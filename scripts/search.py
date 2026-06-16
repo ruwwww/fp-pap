@@ -108,6 +108,10 @@ def build_objective(model_key, model_spec, X_train, y_train, X_val, y_val):
     class_path   = model_spec["class"]
     module_path, class_name = class_path.rsplit(".", 1)
 
+    # Cache import once — not per trial
+    module = importlib.import_module(module_path)
+    model_cls = getattr(module, class_name)
+
     def objective(trial: optuna.Trial) -> float:
         # Sample hyperparameters
         searched = suggest_params(trial, search_space)
@@ -120,8 +124,7 @@ def build_objective(model_key, model_spec, X_train, y_train, X_val, y_val):
             params["units"] = params.pop("unit_size")
 
         try:
-            module = importlib.import_module(module_path)
-            model = getattr(module, class_name)(params=params)
+            model = model_cls(params=params)
             model.fit(X_train, y_train)
             preds = model.predict(X_val)
             score = rmse(y_val.values, preds)
@@ -172,12 +175,17 @@ def run_search(
 
     objective = build_objective(model_key, model_spec, X_train, y_train, X_val, y_val)
 
-    log.info(f"  Searching {model_key}: {n_trials} trials, {n_jobs} jobs...")
+    # Avoid CPU contention: if model already uses all cores (n_jobs=-1),
+    # force Optuna to run trials sequentially
+    model_n_jobs = model_spec.get("params", {}).get("n_jobs")
+    effective_jobs = 1 if model_n_jobs == -1 else n_jobs
+
+    log.info(f"  Searching {model_key}: {n_trials} trials, {effective_jobs} jobs...")
     study.optimize(
         objective,
         n_trials=n_trials,
-        n_jobs=n_jobs,
-        show_progress_bar=False,
+        n_jobs=effective_jobs,
+        show_progress_bar=True,
         catch=(Exception,),
     )
 
