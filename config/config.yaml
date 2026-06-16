@@ -1,0 +1,91 @@
+# ============================================================
+# TIME SERIES PROJECT - Main Configuration
+# Rupiah Resilience: USD/IDR Forecasting
+# ============================================================
+
+project:
+  name: "Rupiah Resilience — USD/IDR Forecasting"
+  group_number: "XX"                     # UPDATE: ganti nomor kelompok
+  random_seed: 42
+  target_column: "USDIDR"               # Kolom yang diprediksi
+  date_column: "Date"                    # Kolom tanggal
+
+  # Semua feature columns (semua selain target & date)
+  feature_columns:
+    - OIL
+    - GOLD
+    - SP500
+    - IHSG
+    - VIX
+    - CPI
+    - BI_rate
+    - US_rate
+
+# Data paths
+paths:
+  raw_data: "data/raw/"
+  processed_data: "data/processed/"
+  results: "results/"
+  models_saved: "results/models/"
+  plots: "results/plots/"
+  metrics: "results/metrics/"
+  submissions: "data/submissions/"
+
+# File-file dataset Kaggle
+data_files:
+  train: "data/raw/data_train.csv"
+  test:  "data/raw/data_test.csv"         # data Kaggle test (tanpa USDIDR)
+  submission_template: "data/raw/submission.csv"
+
+# Dataset stats (dari EDA)
+dataset:
+  freq: "B"                              # Business days (hari kerja)
+  train_start: "2010-01-04"
+  train_end:   "2023-05-31"
+  test_start:  "2023-06-01"
+  test_end:    "2026-05-29"
+  n_train_rows: 3498
+  n_test_rows: 778
+  n_features: 8                          # exogenous features
+  missing_values: false
+
+# Train-Test Split Scenarios (sesuai instruksi)
+# Note: ini split dari data_train.csv untuk evaluasi internal
+# Data test Kaggle (data_test.csv) digunakan untuk forecast submission
+scenarios:
+  - name: "scenario_1"
+    label: "80/20 Split"
+    train_ratio: 0.80
+    test_ratio: 0.20
+  - name: "scenario_2"
+    label: "70/30 Split"
+    train_ratio: 0.70
+    test_ratio: 0.30
+  - name: "scenario_3"
+    label: "60/40 Split"
+    train_ratio: 0.60
+    test_ratio: 0.40
+
+# Forecast configuration (sesuai instruksi poin 6)
+# Forecast menggunakan data_test.csv Kaggle (sudah ada feature-nya)
+forecast:
+  start_date: "2023-06-01"
+  end_date:   "2026-05-29"
+  frequency:  "B"                        # Business days
+
+# Evaluation metrics (sesuai instruksi)
+metrics:
+  - RMSE
+  - MAPE
+  - MAE
+  - R2
+
+# MLflow tracking
+mlflow:
+  tracking_uri: "mlruns"
+  experiment_name: "rupiah_resilience_usdidr"
+
+# Logging
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

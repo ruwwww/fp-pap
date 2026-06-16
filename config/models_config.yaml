@@ -1,0 +1,445 @@
+# ============================================================
+# TIME SERIES PROJECT - Model Registry + Hyperparameter Config
+# ============================================================
+# Semua definisi model dan hyperparameter ada di sini.
+# Untuk hyperparameter search, tambahkan blok `search_space`.
+# Format search_space:
+#   type: int | float | categorical | bool
+#   low / high: range untuk int/float
+#   log: true untuk log-scale sampling (float)
+#   choices: list untuk categorical
+# ============================================================
+
+models:
+
+  # ══════════════════════════════════════════════════════════
+  # MODEL A — Machine Learning
+  # ══════════════════════════════════════════════════════════
+  ml_models:
+
+    random_forest:
+      enabled: true
+      class: "src.models.ml_models.RandomForestModel"
+      category: "ML"
+      parallel_safe: true          # can run in subprocess
+      params:
+        n_estimators: 200
+        max_depth: 10
+        min_samples_split: 5
+        random_state: 42
+        n_jobs: -1
+      search_space:
+        n_estimators:
+          type: int
+          low: 100
+          high: 600
+        max_depth:
+          type: int
+          low: 3
+          high: 20
+        min_samples_split:
+          type: int
+          low: 2
+          high: 20
+        min_samples_leaf:
+          type: int
+          low: 1
+          high: 10
+
+    xgboost:
+      enabled: true
+      class: "src.models.ml_models.XGBoostModel"
+      category: "ML"
+      parallel_safe: true
+      params:
+        n_estimators: 300
+        learning_rate: 0.05
+        max_depth: 6
+        subsample: 0.8
+        colsample_bytree: 0.8
+        min_child_weight: 1
+        gamma: 0
+        reg_alpha: 0
+        reg_lambda: 1
+        random_state: 42
+      search_space:
+        n_estimators:
+          type: int
+          low: 100
+          high: 800
+        learning_rate:
+          type: float
+          low: 0.005
+          high: 0.3
+          log: true
+        max_depth:
+          type: int
+          low: 3
+          high: 12
+        subsample:
+          type: float
+          low: 0.5
+          high: 1.0
+        colsample_bytree:
+          type: float
+          low: 0.5
+          high: 1.0
+        min_child_weight:
+          type: int
+          low: 1
+          high: 10
+        reg_alpha:
+          type: float
+          low: 1.0e-8
+          high: 10.0
+          log: true
+        reg_lambda:
+          type: float
+          low: 1.0e-8
+          high: 10.0
+          log: true
+
+    lightgbm:
+      enabled: true
+      class: "src.models.ml_models.LightGBMModel"
+      category: "ML"
+      parallel_safe: true
+      params:
+        n_estimators: 300
+        learning_rate: 0.05
+        max_depth: -1
+        num_leaves: 31
+        min_child_samples: 20
+        subsample: 0.8
+        colsample_bytree: 0.8
+        reg_alpha: 0
+        reg_lambda: 0
+        random_state: 42
+        n_jobs: 1                  # 1 here so outer parallelism works
+        verbose: -1
+      search_space:
+        n_estimators:
+          type: int
+          low: 100
+          high: 800
+        learning_rate:
+          type: float
+          low: 0.005
+          high: 0.3
+          log: true
+        num_leaves:
+          type: int
+          low: 20
+          high: 150
+        max_depth:
+          type: int
+          low: -1
+          high: 20
+        min_child_samples:
+          type: int
+          low: 5
+          high: 100
+        subsample:
+          type: float
+          low: 0.5
+          high: 1.0
+        colsample_bytree:
+          type: float
+          low: 0.5
+          high: 1.0
+
+    gradient_boosting:
+      enabled: true
+      class: "src.models.ml_models.GradientBoostingModel"
+      category: "ML"
+      parallel_safe: true
+      params:
+        n_estimators: 200
+        learning_rate: 0.05
+        max_depth: 5
+        subsample: 0.8
+        min_samples_split: 5
+        random_state: 42
+      search_space:
+        n_estimators:
+          type: int
+          low: 100
+          high: 500
+        learning_rate:
+          type: float
+          low: 0.01
+          high: 0.3
+          log: true
+        max_depth:
+          type: int
+          low: 3
+          high: 10
+        subsample:
+          type: float
+          low: 0.5
+          high: 1.0
+        min_samples_split:
+          type: int
+          low: 2
+          high: 20
+
+    ridge:
+      enabled: true
+      class: "src.models.ml_models.RidgeModel"
+      category: "ML"
+      parallel_safe: true
+      params:
+        alpha: 1.0
+      search_space:
+        alpha:
+          type: float
+          low: 0.001
+          high: 1000.0
+          log: true
+
+    svr:
+      enabled: false
+      class: "src.models.ml_models.SVRModel"
+      category: "ML"
+      parallel_safe: true
+      params:
+        kernel: rbf
+        C: 1.0
+        epsilon: 0.1
+        gamma: scale
+      search_space:
+        C:
+          type: float
+          low: 0.01
+          high: 100.0
+          log: true
+        epsilon:
+          type: float
+          low: 0.001
+          high: 1.0
+          log: true
+        kernel:
+          type: categorical
+          choices: [rbf, linear, poly]
+
+    catboost:
+      enabled: false
+      class: "src.models.ml_models.CatBoostModel"
+      category: "ML"
+      parallel_safe: true
+      params:
+        iterations: 300
+        learning_rate: 0.05
+        depth: 6
+        random_seed: 42
+        verbose: 0
+      search_space:
+        iterations:
+          type: int
+          low: 100
+          high: 600
+        learning_rate:
+          type: float
+          low: 0.005
+          high: 0.3
+          log: true
+        depth:
+          type: int
+          low: 3
+          high: 10
+
+  # ══════════════════════════════════════════════════════════
+  # MODEL B — Deep Learning
+  # ══════════════════════════════════════════════════════════
+  dl_models:
+
+    lstm:
+      enabled: true
+      class: "src.models.dl_models.LSTMModel"
+      category: "DL"
+      parallel_safe: false         # TF has global state; run sequentially
+      params:
+        units: [128, 64]
+        dropout: 0.2
+        epochs: 100
+        batch_size: 32
+        lookback: 30
+        learning_rate: 0.001
+        patience: 15
+      search_space:
+        unit_size:
+          type: categorical
+          choices: [[64, 32], [128, 64], [256, 128], [128, 64, 32]]
+        dropout:
+          type: float
+          low: 0.0
+          high: 0.5
+        lookback:
+          type: int
+          low: 7
+          high: 60
+        learning_rate:
+          type: float
+          low: 0.0001
+          high: 0.01
+          log: true
+        batch_size:
+          type: categorical
+          choices: [16, 32, 64]
+
+    gru:
+      enabled: true
+      class: "src.models.dl_models.GRUModel"
+      category: "DL"
+      parallel_safe: false
+      params:
+        units: [128, 64]
+        dropout: 0.2
+        epochs: 100
+        batch_size: 32
+        lookback: 30
+        learning_rate: 0.001
+        patience: 15
+      search_space:
+        unit_size:
+          type: categorical
+          choices: [[64, 32], [128, 64], [256, 128]]
+        dropout:
+          type: float
+          low: 0.0
+          high: 0.5
+        lookback:
+          type: int
+          low: 7
+          high: 60
+        learning_rate:
+          type: float
+          low: 0.0001
+          high: 0.01
+          log: true
+
+    cnn_lstm:
+      enabled: true
+      class: "src.models.dl_models.CNNLSTMModel"
+      category: "DL"
+      parallel_safe: false
+      params:
+        filters: 64
+        kernel_size: 3
+        lstm_units: [64, 32]
+        dropout: 0.2
+        epochs: 100
+        batch_size: 32
+        lookback: 30
+        learning_rate: 0.001
+        patience: 15
+      search_space:
+        filters:
+          type: categorical
+          choices: [32, 64, 128]
+        kernel_size:
+          type: categorical
+          choices: [2, 3, 5]
+        lookback:
+          type: int
+          low: 7
+          high: 60
+        dropout:
+          type: float
+          low: 0.0
+          high: 0.5
+        learning_rate:
+          type: float
+          low: 0.0001
+          high: 0.01
+          log: true
+
+    bilstm:
+      enabled: false
+      class: "src.models.dl_models.BiLSTMModel"
+      category: "DL"
+      parallel_safe: false
+      params:
+        units: [128, 64]
+        dropout: 0.2
+        epochs: 100
+        batch_size: 32
+        lookback: 30
+        learning_rate: 0.001
+        patience: 15
+      search_space:
+        unit_size:
+          type: categorical
+          choices: [[64, 32], [128, 64], [256, 128]]
+        dropout:
+          type: float
+          low: 0.0
+          high: 0.5
+        lookback:
+          type: int
+          low: 7
+          high: 60
+
+    rnn:
+      enabled: false
+      class: "src.models.dl_models.RNNModel"
+      category: "DL"
+      parallel_safe: false
+      params:
+        units: [64, 32]
+        dropout: 0.2
+        epochs: 100
+        batch_size: 32
+        lookback: 30
+        learning_rate: 0.001
+        patience: 15
+      search_space:
+        unit_size:
+          type: categorical
+          choices: [[32, 16], [64, 32], [128, 64]]
+        dropout:
+          type: float
+          low: 0.0
+          high: 0.5
+
+  # ══════════════════════════════════════════════════════════
+  # ENSEMBLE — Model C + D (D wajib DL)
+  # ══════════════════════════════════════════════════════════
+  ensemble_models:
+
+    voting_xgb_lstm:
+      enabled: true
+      class: "src.models.ensemble_models.VotingEnsemble"
+      category: "Ensemble"
+      base_models:
+        - xgboost           # Model C (ML)
+        - lstm              # Model D (DL - wajib)
+      params:
+        weights: [0.5, 0.5]
+      search_space:
+        weight_ml:
+          type: float
+          low: 0.2
+          high: 0.8           # weight DL = 1 - weight_ml
+
+    stacking_lgbm_gru:
+      enabled: true
+      class: "src.models.ensemble_models.StackingEnsemble"
+      category: "Ensemble"
+      base_models:
+        - lightgbm          # Model C (ML)
+        - gru               # Model D (DL - wajib)
+      meta_learner: ridge
+      params:
+        cv_folds: 5
+
+    blending_rf_lstm:
+      enabled: false
+      class: "src.models.ensemble_models.BlendingEnsemble"
+      category: "Ensemble"
+      base_models:
+        - random_forest     # Model C (ML)
+        - lstm              # Model D (DL - wajib)
+      meta_learner: ridge
+      params:
+        val_ratio: 0.2
