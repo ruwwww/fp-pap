@@ -1,0 +1,147 @@
+feature_configs:
+  dl_only:
+    add_calendar: false
+    add_ratios: false
+    description: "Raw time series \u2014 hanya exogenous vars, tanpa rekayasa feature\
+      \ apapun"
+    diffs: []
+    ema_spans: []
+    exog_lags: []
+    raw_only: true
+    rolling_stats: []
+    rolling_windows: []
+    target_lags: []
+  full:
+    add_calendar: true
+    add_ratios: true
+    description: "Full feature set \u2014 8 target lags, 4 rolling windows, EMA, diff,\
+      \ calendar, ratios"
+    diffs:
+    - 1
+    - 5
+    - 20
+    ema_spans:
+    - 5
+    - 20
+    - 60
+    exog_lags:
+    - 1
+    - 5
+    raw_only: false
+    rolling_stats:
+    - mean
+    - std
+    - min
+    - max
+    - range
+    rolling_windows:
+    - 5
+    - 10
+    - 20
+    - 60
+    target_lags:
+    - 1
+    - 2
+    - 3
+    - 5
+    - 10
+    - 20
+    - 30
+    - 60
+  lag_only:
+    add_calendar: false
+    add_ratios: false
+    description: "Lag only \u2014 target lags + exog lags, no rolling/EMA/ratios/calendar"
+    diffs: []
+    ema_spans: []
+    exog_lags:
+    - 1
+    raw_only: false
+    rolling_stats: []
+    rolling_windows: []
+    target_lags:
+    - 1
+    - 2
+    - 3
+    - 5
+    - 10
+  minimal:
+    add_calendar: false
+    add_ratios: true
+    description: "Minimal features \u2014 lags + ratios only, no rolling/EMA/calendar"
+    diffs:
+    - 1
+    ema_spans: []
+    exog_lags:
+    - 1
+    raw_only: false
+    rolling_stats: []
+    rolling_windows: []
+    target_lags:
+    - 1
+    - 2
+    - 3
+    - 5
+    - 10
+  reduced:
+    add_calendar: true
+    add_ratios: true
+    description: "Reduced features \u2014 fewer lags, single rolling window, fewer\
+      \ diffs"
+    diffs:
+    - 1
+    - 5
+    ema_spans:
+    - 20
+    exog_lags:
+    - 1
+    - 5
+    raw_only: false
+    rolling_stats:
+    - mean
+    - std
+    rolling_windows:
+    - 20
+    target_lags:
+    - 1
+    - 2
+    - 3
+    - 5
+    - 10
+    - 20
+  ridge_full:
+    add_calendar: false
+    add_ratios: true
+    description: "Full numeric features \u2014 semua fitur kecuali calendar"
+    diffs:
+    - 1
+    - 5
+    - 20
+    ema_spans:
+    - 5
+    - 20
+    - 60
+    exog_lags:
+    - 1
+    - 5
+    raw_only: false
+    rolling_stats:
+    - mean
+    - std
+    - min
+    - max
+    - range
+    rolling_windows:
+    - 5
+    - 10
+    - 20
+    - 60
+    target_lags:
+    - 1
+    - 2
+    - 3
+    - 5
+    - 10
+    - 20
+    - 30
+    - 60

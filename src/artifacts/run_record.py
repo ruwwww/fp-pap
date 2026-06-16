@@ -15,8 +15,9 @@ Directory structure for each run:
   runs/
   └── 20260616_103045_xgboost_8020/
       ├── run_metadata.json       ← who, when, how long
-      ├── config_snapshot.yaml    ← frozen config at run time
+      ├── config_snapshot.yaml        ← frozen config at run time
       ├── models_config_snapshot.yaml
+      ├── feature_configs_snapshot.yaml  ← frozen feature config
       ├── params.json             ← model hyperparameters
       ├── metrics.json            ← RMSE, MAPE, MAE, R2, ...
       ├── predictions.csv         ← date, y_true, y_pred, residual
@@ -86,6 +87,7 @@ class RunRecord:
         scenario: str,
         config: dict,
         models_config: dict,
+        feature_configs: Optional[dict] = None,
     ):
         self.run_dir    = run_dir
         self.run_id     = run_id
@@ -93,6 +95,7 @@ class RunRecord:
         self.scenario   = scenario
         self.config     = config
         self.models_config = models_config
+        self.feature_configs = feature_configs or {}
 
         self._start_time  = time.time()
         self._start_dt    = datetime.now()
@@ -119,6 +122,9 @@ class RunRecord:
             yaml.dump(self.config, f, default_flow_style=False, sort_keys=True)
         with open(self.run_dir / "models_config_snapshot.yaml", "w") as f:
             yaml.dump(self.models_config, f, default_flow_style=False, sort_keys=True)
+        if self.feature_configs:
+            with open(self.run_dir / "feature_configs_snapshot.yaml", "w") as f:
+                yaml.dump(self.feature_configs, f, default_flow_style=False, sort_keys=True)
 
     # ── Metadata ───────────────────────────────────────────────────────────
     def _write_metadata(self, status: str = "running") -> None:

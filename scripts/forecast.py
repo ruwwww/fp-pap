@@ -58,6 +58,7 @@ def prepare_submission_features(
     kaggle_test_df: pd.DataFrame,
     target_col: str,
     date_col: str,
+    feature_config: str = "full",
 ) -> tuple:
     """
     Prepare feature matrices for:
@@ -75,6 +76,7 @@ def prepare_submission_features(
     feat_eng = TimeSeriesFeatureEngineer(
         target_col=target_col,
         date_col=date_col,
+        config_name=feature_config,
     )
 
     # 1. Feature engineer train
@@ -145,9 +147,23 @@ def main():
 
     log.info(f"Train: {train_df.shape} | Kaggle test: {kaggle_test_df.shape}")
 
-    # ── Prepare features ──────────────────────────────────────────────
+    # ── Prepare features (per-model feature config) ────────────────────
+    feat_config = "full"
+    if args.model:
+        for cat in ["ml_models", "dl_models"]:
+            spec_check = mcfg["models"].get(cat, {}).get(args.model)
+            if spec_check:
+                feat_config = spec_check.get("feature_config", "full")
+                break
+    elif args.ensemble:
+        ens_spec_check = mcfg["models"]["ensemble_models"].get(args.ensemble, {})
+        feat_config = ens_spec_check.get("feature_config", "full")
+
+    log.info(f"Using feature config: {feat_config}")
+
     X_full, y_full, X_kaggle, feat_eng, feat_cols = prepare_submission_features(
-        train_df, kaggle_test_df, target_col, date_col
+        train_df, kaggle_test_df, target_col, date_col,
+        feature_config=feat_config,
     )
 
     # ── Load best params if requested ─────────────────────────────────
@@ -243,7 +259,10 @@ def main():
     )
 
     # ── Record as artifact ────────────────────────────────────────────
-    store = ArtifactStore(args.config, args.models_config)
+    store = ArtifactStore(
+        config_path=args.config,
+        models_config_path=args.models_config,
+    )
     run = store.start_run(
         model_name=model_label,
         scenario="Kaggle Submission (full train)",

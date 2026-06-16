@@ -67,14 +67,17 @@ class ArtifactStore:
         runs_root: str = "runs",
         config_path: str = "config/config.yaml",
         models_config_path: str = "config/models_config.yaml",
+        feature_configs_path: str = "config/feature_configs.yaml",
     ):
         self.runs_root = Path(runs_root)
         self.runs_root.mkdir(parents=True, exist_ok=True)
-        self.config_path        = config_path
-        self.models_config_path = models_config_path
+        self.config_path          = config_path
+        self.models_config_path   = models_config_path
+        self.feature_configs_path = feature_configs_path
 
-        self._config        = self._load_yaml(config_path)
-        self._models_config = self._load_yaml(models_config_path)
+        self._config          = self._load_yaml(config_path)
+        self._models_config   = self._load_yaml(models_config_path)
+        self._feature_configs = self._load_yaml(feature_configs_path)
 
         self._active_runs: List[RunRecord] = []
 
@@ -119,6 +122,7 @@ class ArtifactStore:
             scenario=scenario,
             config=config,
             models_config=models_config,
+            feature_configs=self._feature_configs,
         )
         self._active_runs.append(run)
         return run

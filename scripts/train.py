@@ -177,14 +177,16 @@ class TrainingPipeline:
         log.info(f"Loaded: {df.shape} | cols: {list(df.columns)}")
         return df
 
-    def _prepare_split(self, df: pd.DataFrame, train_ratio: float):
+    def _prepare_split(self, df: pd.DataFrame, train_ratio: float,
+                        feature_config: str = "full"):
         n = len(df)
         split = int(n * train_ratio)
         train_df = df.iloc[:split].copy().reset_index(drop=True)
         test_df  = df.iloc[split:].copy().reset_index(drop=True)
 
         feat_eng = TimeSeriesFeatureEngineer(
-            target_col=self.target_col, date_col=self.date_col
+            target_col=self.target_col, date_col=self.date_col,
+            config_name=feature_config,
         )
         train_fe = feat_eng.fit_transform(train_df).dropna()
         full_ctx = pd.concat([train_df, test_df], ignore_index=True)
@@ -197,8 +199,8 @@ class TrainingPipeline:
         X_test  = test_fe[feat_cols]
         y_test  = test_fe[self.target_col]
 
-        # Persist for parallel workers
-        suffix = f"{int(train_ratio*100)}"
+        # Persist for parallel workers (keyed by feature_config name)
+        suffix = f"{int(train_ratio*100)}_{feature_config}"
         X_train.to_parquet(self.tmp_dir / f"X_train_{suffix}.parquet")
         y_train.to_frame().to_parquet(self.tmp_dir / f"y_train_{suffix}.parquet")
         X_test.to_parquet(self.tmp_dir / f"X_test_{suffix}.parquet")
@@ -335,58 +337,100 @@ class TrainingPipeline:
             ratio = scenario["train_ratio"]
             log.info(f"\n{'='*65}\nScenario: {label}\n{'='*65}")
 
-            (X_tr_path, y_tr_path, X_te_path, y_te_path,
-             train_df, test_df, feat_eng, feat_cols,
-             X_train, y_train, X_test, y_test) = self._prepare_split(df, ratio)
+            # Group models by feature_config so we prepare data once per config
+            models_by_config: Dict[str, list] = {}
+            for model_key, model_spec in all_models:
+                fc = model_spec.get("feature_config", "full")
+                models_by_config.setdefault(fc, []).append((model_key, model_spec))
 
-            log.info(f"  Train: {len(X_train)} | Test: {len(X_test)} | Features: {len(feat_cols)}")
-
-            parallel_models  = [(k, s) for k, s in all_models if s.get("parallel_safe", True)]
-            sequential_models = [(k, s) for k, s in all_models if not s.get("parallel_safe", True)]
-            ensemble_specs   = {
+            ensemble_specs = {
                 k: s for k, s in self.mcfg["models"].get("ensemble_models", {}).items()
                 if s.get("enabled", True) and (filter_models is None or k in filter_models)
             }
+            # Add ensemble models with their own config
+            for ens_key, ens_spec in ensemble_specs.items():
+                fc = ens_spec.get("feature_config", "full")
+                models_by_config.setdefault(fc, []).append((ens_key, ens_spec))
 
-            # ── PARALLEL ML ───────────────────────────────────────────
-            if parallel and parallel_models:
-                log.info(f"  Running {len(parallel_models)} ML models in parallel ({workers} workers)...")
-                futures = {}
-                with ProcessPoolExecutor(max_workers=workers) as executor:
-                    for model_key, model_spec in parallel_models:
-                        future = executor.submit(
-                            _parallel_worker,
-                            model_key, model_spec,
-                            X_tr_path, y_tr_path, X_te_path, y_te_path,
-                            label, best_params_path,
-                        )
-                        futures[future] = (model_key, model_spec)
+            for feature_config, model_group in models_by_config.items():
+                log.info(f"\n  ── Feature config: {feature_config} ──")
 
-                    for future in as_completed(futures):
-                        model_key, model_spec = futures[future]
-                        result = future.result()
-                        if result["status"] == "ok":
-                            # Can't save model object from subprocess, mark path as None
-                            self._train_and_record(
-                                model_key=model_key,
-                                model_spec=model_spec,
-                                model_name=result["model_name"],
-                                category=result["category"],
-                                params=result["params"],
-                                metrics=result["metrics"],
-                                fit_time=result["fit_time"],
-                                preds=np.array(result["preds"]),
-                                scenario_label=label,
-                                train_df=train_df, test_df=test_df,
-                                y_train=y_train, y_test=y_test,
-                                model_obj=None,  # subprocess — no model obj
+                parallel_models  = [(k, s) for k, s in model_group
+                                    if s.get("parallel_safe", True)]
+                sequential_models = [(k, s) for k, s in model_group
+                                     if not s.get("parallel_safe", True)]
+
+                if not parallel_models and not sequential_models:
+                    continue
+
+                # Prepare data with this feature config
+                (X_tr_path, y_tr_path, X_te_path, y_te_path,
+                 train_df, test_df, feat_eng, feat_cols,
+                 X_train, y_train, X_test, y_test) = self._prepare_split(
+                    df, ratio, feature_config=feature_config
+                )
+
+                n_feats = len(feat_cols)
+                log.info(f"  Train: {len(X_train)} | Test: {len(X_test)} | Features: {n_feats}")
+
+                # ── PARALLEL ML ───────────────────────────────────────
+                if parallel and parallel_models:
+                    log.info(f"  Running {len(parallel_models)} models in parallel ({workers} workers)...")
+                    futures = {}
+                    with ProcessPoolExecutor(max_workers=workers) as executor:
+                        for model_key, model_spec in parallel_models:
+                            future = executor.submit(
+                                _parallel_worker,
+                                model_key, model_spec,
+                                X_tr_path, y_tr_path, X_te_path, y_te_path,
+                                label, best_params_path,
                             )
-                        else:
-                            log.error(f"  [FAIL] {model_key}: {result['error']}")
-            else:
-                # Sequential ML
-                for model_key, model_spec in parallel_models:
-                    log.info(f"  [ML] {model_key}")
+                            futures[future] = (model_key, model_spec)
+
+                        for future in as_completed(futures):
+                            model_key, model_spec = futures[future]
+                            result = future.result()
+                            if result["status"] == "ok":
+                                self._train_and_record(
+                                    model_key=model_key,
+                                    model_spec=model_spec,
+                                    model_name=result["model_name"],
+                                    category=result["category"],
+                                    params=result["params"],
+                                    metrics=result["metrics"],
+                                    fit_time=result["fit_time"],
+                                    preds=np.array(result["preds"]),
+                                    scenario_label=label,
+                                    train_df=train_df, test_df=test_df,
+                                    y_train=y_train, y_test=y_test,
+                                    model_obj=None,
+                                )
+                            else:
+                                log.error(f"  [FAIL] {model_key}: {result['error']}")
+                else:
+                    for model_key, model_spec in parallel_models:
+                        log.info(f"  {model_key}")
+                        try:
+                            model, params = self._build_model(model_key, model_spec, best_params_path)
+                            t0 = time.time()
+                            model.fit(X_train, y_train)
+                            fit_time = time.time() - t0
+                            preds = model.predict(X_test)
+                            metrics = evaluate_all(y_test.values, preds)
+                            self._train_and_record(
+                                model_key, model_spec, model.name,
+                                model_spec.get("category", "ML"),
+                                params, metrics, fit_time, preds, label,
+                                train_df, test_df, y_train, y_test,
+                                model_obj=model,
+                            )
+                        except Exception as e:
+                            log.error(f"  [FAIL] {model_key}: {e}")
+                        gc.collect()
+
+                # ── SEQUENTIAL (DL / non-parallel-safe) ─────────────
+                for model_key, model_spec in sequential_models:
+                    log.info(f"  [SEQ] {model_key}")
                     try:
                         model, params = self._build_model(model_key, model_spec, best_params_path)
                         t0 = time.time()
@@ -404,81 +448,6 @@ class TrainingPipeline:
                     except Exception as e:
                         log.error(f"  [FAIL] {model_key}: {e}")
                     gc.collect()
-
-            # ── SEQUENTIAL DL (TF global state) ──────────────────────
-            for model_key, model_spec in sequential_models:
-                log.info(f"  [DL] {model_key}")
-                try:
-                    model, params = self._build_model(model_key, model_spec, best_params_path)
-                    t0 = time.time()
-                    model.fit(X_train, y_train)
-                    fit_time = time.time() - t0
-                    preds = model.predict(X_test)
-                    metrics = evaluate_all(y_test.values, preds)
-                    self._train_and_record(
-                        model_key, model_spec, model.name,
-                        model_spec.get("category", "DL"),
-                        params, metrics, fit_time, preds, label,
-                        train_df, test_df, y_train, y_test,
-                        model_obj=model,
-                    )
-                except Exception as e:
-                    log.error(f"  [FAIL] {model_key}: {e}")
-                gc.collect()
-
-            # ── ENSEMBLE ──────────────────────────────────────────────
-            for ens_key, ens_spec in ensemble_specs.items():
-                log.info(f"  [Ensemble] {ens_key}")
-                try:
-                    base_instances = []
-                    for k in ens_spec["base_models"]:
-                        for cat in ["ml_models", "dl_models"]:
-                            bspec = self.mcfg["models"].get(cat, {}).get(k)
-                            if bspec:
-                                m, _ = self._build_model(k, bspec, best_params_path)
-                                base_instances.append(m)
-
-                    meta_key = ens_spec.get("meta_learner")
-                    meta_instance = None
-                    if meta_key:
-                        for cat in ["ml_models", "dl_models"]:
-                            ms = self.mcfg["models"].get(cat, {}).get(meta_key)
-                            if ms:
-                                meta_instance, _ = self._build_model(meta_key, ms, None)
-
-                    module_path, class_name = ens_spec["class"].rsplit(".", 1)
-                    mod = importlib.import_module(module_path)
-                    cls = getattr(mod, class_name)
-                    weights = ens_spec.get("params", {}).get("weights")
-
-                    if meta_instance:
-                        ensemble = cls(base_models=base_instances,
-                                       meta_learner=meta_instance,
-                                       params=ens_spec.get("params", {}))
-                    elif weights:
-                        ensemble = cls(base_models=base_instances,
-                                       weights=weights,
-                                       params=ens_spec.get("params", {}))
-                    else:
-                        ensemble = cls(base_models=base_instances,
-                                       params=ens_spec.get("params", {}))
-
-                    t0 = time.time()
-                    ensemble.fit(X_train, y_train)
-                    fit_time = time.time() - t0
-                    preds = ensemble.predict(X_test)
-                    metrics = evaluate_all(y_test.values, preds)
-                    self._train_and_record(
-                        ens_key, ens_spec, ensemble.name,
-                        "Ensemble",
-                        ens_spec.get("params", {}),
-                        metrics, fit_time, preds, label,
-                        train_df, test_df, y_train, y_test,
-                        model_obj=ensemble,
-                    )
-                except Exception as e:
-                    log.error(f"  [FAIL] ensemble {ens_key}: {e}")
-                gc.collect()
 
         # ── Finalize ──────────────────────────────────────────────────
         self._finalize()

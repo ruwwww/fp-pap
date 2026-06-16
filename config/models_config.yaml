@@ -21,6 +21,7 @@ models:
       enabled: true
       class: "src.models.ml_models.RandomForestModel"
       category: "ML"
+      feature_config: "reduced"
       parallel_safe: true          # can run in subprocess
       params:
         n_estimators: 200
@@ -50,6 +51,7 @@ models:
       enabled: true
       class: "src.models.ml_models.XGBoostModel"
       category: "ML"
+      feature_config: "reduced"
       parallel_safe: true
       params:
         n_estimators: 300
@@ -103,6 +105,7 @@ models:
       enabled: true
       class: "src.models.ml_models.LightGBMModel"
       category: "ML"
+      feature_config: "reduced"
       parallel_safe: true
       params:
         n_estimators: 300
@@ -152,6 +155,7 @@ models:
       enabled: true
       class: "src.models.ml_models.GradientBoostingModel"
       category: "ML"
+      feature_config: "reduced"
       parallel_safe: true
       params:
         n_estimators: 200
@@ -187,6 +191,7 @@ models:
       enabled: true
       class: "src.models.ml_models.RidgeModel"
       category: "ML"
+      feature_config: "ridge_full"
       parallel_safe: true
       params:
         alpha: 1.0
@@ -201,6 +206,7 @@ models:
       enabled: false
       class: "src.models.ml_models.SVRModel"
       category: "ML"
+      feature_config: "reduced"
       parallel_safe: true
       params:
         kernel: rbf
@@ -226,6 +232,7 @@ models:
       enabled: false
       class: "src.models.ml_models.CatBoostModel"
       category: "ML"
+      feature_config: "reduced"
       parallel_safe: true
       params:
         iterations: 300
@@ -257,6 +264,7 @@ models:
       enabled: true
       class: "src.models.dl_models.LSTMModel"
       category: "DL"
+      feature_config: "dl_only"
       parallel_safe: false         # TF has global state; run sequentially
       params:
         units: [128, 64]
@@ -291,6 +299,7 @@ models:
       enabled: true
       class: "src.models.dl_models.GRUModel"
       category: "DL"
+      feature_config: "dl_only"
       parallel_safe: false
       params:
         units: [128, 64]
@@ -322,6 +331,7 @@ models:
       enabled: true
       class: "src.models.dl_models.CNNLSTMModel"
       category: "DL"
+      feature_config: "dl_only"
       parallel_safe: false
       params:
         filters: 64
@@ -358,6 +368,7 @@ models:
       enabled: false
       class: "src.models.dl_models.BiLSTMModel"
       category: "DL"
+      feature_config: "dl_only"
       parallel_safe: false
       params:
         units: [128, 64]
@@ -384,6 +395,7 @@ models:
       enabled: false
       class: "src.models.dl_models.RNNModel"
       category: "DL"
+      feature_config: "dl_only"
       parallel_safe: false
       params:
         units: [64, 32]
@@ -411,6 +423,7 @@ models:
       enabled: true
       class: "src.models.ensemble_models.VotingEnsemble"
       category: "Ensemble"
+      feature_config: "full"
       base_models:
         - xgboost           # Model C (ML)
         - lstm              # Model D (DL - wajib)
@@ -426,6 +439,7 @@ models:
       enabled: true
       class: "src.models.ensemble_models.StackingEnsemble"
       category: "Ensemble"
+      feature_config: "full"
       base_models:
         - lightgbm          # Model C (ML)
         - gru               # Model D (DL - wajib)
@@ -437,6 +451,7 @@ models:
       enabled: false
       class: "src.models.ensemble_models.BlendingEnsemble"
       category: "Ensemble"
+      feature_config: "full"
       base_models:
         - random_forest     # Model C (ML)
         - lstm              # Model D (DL - wajib)

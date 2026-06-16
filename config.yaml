@@ -1,0 +1,19 @@
+project:
+  name: "Rupiah Resilience -- USD/IDR Forecasting"
+  random_seed: 42
+
+data:
+  train: "data/raw/data_train.csv"
+  test: "data/raw/data_test.csv"
+  submission: "data/raw/submission.csv"
+  target: "USDIDR"
+  date: "Date"
+  exogenous: [OIL, GOLD, SP500, IHSG, VIX, CPI, BI_rate, US_rate]
+
+scenarios:
+  - name: "80/20"
+    train_ratio: 0.80
+  - name: "70/30"
+    train_ratio: 0.70
+  - name: "60/40"
+    train_ratio: 0.60

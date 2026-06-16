@@ -1,0 +1,110 @@
+# ============================================================
+# FEATURE CONFIGURATIONS — Named presets for feature engineering
+# ============================================================
+# Setiap model dapat memilih feature_config yang berbeda
+# melalui kolom `feature_config` di models_config.yaml.
+#
+# Untuk DL model, gunakan `dl_only` agar input berupa raw
+# time series (exogenous vars) tanpa rekayasa flat features.
+# ============================================================
+
+feature_configs:
+
+  # ──────────────────────────────────────────────────────────
+  # FULL — Default saat ini (~101 features)
+  # 8 target lags, 4 rolling windows, EMA, diff, calendar, ratios
+  # ──────────────────────────────────────────────────────────
+  full:
+    description: "Full feature set — 8 target lags, 4 rolling windows, EMA, diff, calendar, ratios"
+    target_lags: [1, 2, 3, 5, 10, 20, 30, 60]
+    exog_lags: [1, 5]
+    rolling_windows: [5, 10, 20, 60]
+    rolling_stats: [mean, std, min, max, range]
+    ema_spans: [5, 20, 60]
+    diffs: [1, 5, 20]
+    add_calendar: true
+    add_ratios: true
+    raw_only: false
+
+  # ──────────────────────────────────────────────────────────
+  # REDUCED — ~40 features, single rolling window
+  # Untuk tree-based models (RF, XGB, LGBM, GBM) yang
+  # sensitif terhadap multicollinearity
+  # ──────────────────────────────────────────────────────────
+  reduced:
+    description: "Reduced features — fewer lags, single rolling window, fewer diffs"
+    target_lags: [1, 2, 3, 5, 10, 20]
+    exog_lags: [1, 5]
+    rolling_windows: [20]
+    rolling_stats: [mean, std]
+    ema_spans: [20]
+    diffs: [1, 5]
+    add_calendar: true
+    add_ratios: true
+    raw_only: false
+
+  # ──────────────────────────────────────────────────────────
+  # MINIMAL — ~15 features, lag-only + ratios
+  # Benchmark sederhana, cepat training
+  # ──────────────────────────────────────────────────────────
+  minimal:
+    description: "Minimal features — lags + ratios only, no rolling/EMA/calendar"
+    target_lags: [1, 2, 3, 5, 10]
+    exog_lags: [1]
+    rolling_windows: []
+    rolling_stats: []
+    ema_spans: []
+    diffs: [1]
+    add_calendar: false
+    add_ratios: true
+    raw_only: false
+
+  # ──────────────────────────────────────────────────────────
+  # LAG_ONLY — ~10 features, hanya lag target & exog
+  # Untuk mengisolasi sinyal autoregresif murni
+  # ──────────────────────────────────────────────────────────
+  lag_only:
+    description: "Lag only — target lags + exog lags, no rolling/EMA/ratios/calendar"
+    target_lags: [1, 2, 3, 5, 10]
+    exog_lags: [1]
+    rolling_windows: []
+    rolling_stats: []
+    ema_spans: []
+    diffs: []
+    add_calendar: false
+    add_ratios: false
+    raw_only: false
+
+  # ──────────────────────────────────────────────────────────
+  # DL_ONLY — Raw time series (NO flat feature engineering)
+  # Input: hanya exogenous variables (OIL, GOLD, SP500, ...)
+  # Output: raw columns, no lags/rolling/diff/calendar/ratios
+  # DL models internally reshape to (samples, lookback, features)
+  # ──────────────────────────────────────────────────────────
+  dl_only:
+    description: "Raw time series — hanya exogenous vars, tanpa rekayasa feature apapun"
+    target_lags: []
+    exog_lags: []
+    rolling_windows: []
+    rolling_stats: []
+    ema_spans: []
+    diffs: []
+    add_calendar: false
+    add_ratios: false
+    raw_only: true
+
+  # ──────────────────────────────────────────────────────────
+  # RIDGE_FULL — Sama seperti FULL tapi tanpa calendar
+  # Untuk Ridge khusus sinyal numerik murni
+  # ──────────────────────────────────────────────────────────
+  ridge_full:
+    description: "Full numeric features — semua fitur kecuali calendar"
+    target_lags: [1, 2, 3, 5, 10, 20, 30, 60]
+    exog_lags: [1, 5]
+    rolling_windows: [5, 10, 20, 60]
+    rolling_stats: [mean, std, min, max, range]
+    ema_spans: [5, 20, 60]
+    diffs: [1, 5, 20]
+    add_calendar: false
+    add_ratios: true
+    raw_only: false

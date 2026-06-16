@@ -265,15 +265,7 @@ def main():
     train_df = train_full.iloc[:val_split].copy()
     val_df   = train_full.iloc[val_split:].copy()
 
-    feat_eng = TimeSeriesFeatureEngineer(target_col=target_col, date_col=date_col)
-    train_fe = feat_eng.fit_transform(train_df).dropna()
-    val_fe   = feat_eng.transform(val_df, train_full).dropna()
-
-    feat_cols = feat_eng.get_feature_columns(train_fe)
-    X_train, y_train = train_fe[feat_cols], train_fe[target_col]
-    X_val,   y_val   = val_fe[feat_cols],   val_fe[target_col]
-
-    log.info(f"Train: {len(X_train)} | Val: {len(X_val)} | Features: {len(feat_cols)}")
+    log.info(f"Full train: {len(train_df)} | Val: {len(val_df)}")
 
     # ── Determine which models to search ─────────────────────────────
     models_to_search = []
@@ -303,18 +295,37 @@ def main():
 
     log.info(f"Models to search: {[k for k,_ in models_to_search]}")
 
-    # ── Run search ────────────────────────────────────────────────────
+    # ── Run search (per-model feature config) ───────────────────────────
     all_best = {}
     for model_key, model_spec in models_to_search:
         log.info(f"\n{'─'*50}")
         log.info(f"Searching: {model_key}")
+
+        # Create per-model feature engineer using model's feature_config
+        feat_config_name = model_spec.get("feature_config")
+        feat_eng = TimeSeriesFeatureEngineer(
+            target_col=target_col,
+            date_col=date_col,
+            config_name=feat_config_name,
+        )
+        log.info(f"  Feature config: {feat_eng.get_config_snapshot()['config_name']}")
+
+        train_fe = feat_eng.fit_transform(train_df).dropna()
+        val_fe   = feat_eng.transform(val_df, train_full).dropna()
+
+        feat_cols = feat_eng.get_feature_columns(train_fe)
+        X_train_m, y_train_m = train_fe[feat_cols], train_fe[target_col]
+        X_val_m,   y_val_m   = val_fe[feat_cols],   val_fe[target_col]
+
+        log.info(f"  Train: {len(X_train_m)} | Val: {len(X_val_m)} | Features: {len(feat_cols)}")
+
         best_params = run_search(
             model_key=model_key,
             model_spec=model_spec,
-            X_train=X_train,
-            y_train=y_train,
-            X_val=X_val,
-            y_val=y_val,
+            X_train=X_train_m,
+            y_train=y_train_m,
+            X_val=X_val_m,
+            y_val=y_val_m,
             n_trials=args.trials,
             n_jobs=args.jobs,
             resume=args.resume,
