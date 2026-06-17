@@ -1,51 +1,27 @@
-# ── Python ─────────────────────────────────────────
 __pycache__/
 *.py[cod]
-*.pyo
 *.egg-info/
-.eggs/
+*.egg
 dist/
 build/
-*.egg
-
-# ── Virtual Environments ────────────────────────────
+.eggs/
 venv/
 .venv/
 env/
-
-# ── Jupyter ─────────────────────────────────────────
 .ipynb_checkpoints/
 *.ipynb_metadata
-
-# ── Data (processed & submissions are generated) ─────
 data/processed/
 data/submissions/
-
-# ── Results (all generated outputs) ──────────────────
 results/
-model_a/results/
-model_b/results/
-model_c/results/
-model_d/results/
 mlruns/
-
-# ── Archives ────────────────────────────────────────
 *.zip
-
-# ── IDE ──────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
-
-# ── OS ───────────────────────────────────────────────
 .DS_Store
 Thumbs.db
-
-# ── Secrets ──────────────────────────────────────────
 .env
 *.kaggle.json
 kaggle.json
-
-# ── Logs ─────────────────────────────────────────────
 *.log
 logs/
