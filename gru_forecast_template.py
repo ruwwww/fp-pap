@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """GRU forecasting model for daily USDIDR time series.
 
-This script adapts the ElasticNet template to use a Gated Recurrent Unit (GRU)
-Deep Learning model via PyTorch. It now includes a manual hyperparameter search.
+This script uses a Gated Recurrent Unit (GRU) with Optuna hyperparameter optimization.
+Includes critical target-difference features and aggressive hyperparameter search.
 
 Requirements
 ------------
-torch, pandas, numpy, scikit-learn
+torch, pandas, numpy, scikit-learn, optuna
 
 Example
 -------
@@ -19,39 +19,34 @@ python gru_forecast.py \
 from __future__ import annotations
 
 import argparse
-import itertools
 import warnings
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import optuna
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.metrics import mean_squared_error
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 # -----------------------------
-# Configuration & Hyperparameter Grid
+# Configuration
 # -----------------------------
 TARGET_COL = "USDIDR"
-DEFAULT_LAGS = [1, 5, 21, 63] 
-LOOKBACK = 21  # Number of past days to feed into the GRU
-BATCH_SIZE = 64
-EPOCHS = 50 # Reduced epochs for faster search
-EARLY_STOPPING_PATIENCE = 10
+LOOKBACK = 63  # Increased to 63 days (Quarterly view)
 RANDOM_STATE = 42
+OPTUNA_TRIALS = 50
+OPTUNA_TIMEOUT = 7200  # 2 hours max search time
 
-# Hyperparameter Search Grid
-HP_GRID = {
-    "hidden_size": [32, 64],
-    "num_layers": [1, 2],
-    "dropout": [0.1, 0.3],
-    "learning_rate": [0.001, 0.0005]
-}
+# Training Defaults
+BATCH_SIZE = 64
+EPOCHS = 150  # More epochs for deeper models
+EARLY_STOPPING_PATIENCE = 20
 
 # Set device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -126,6 +121,7 @@ def engineer_exogenous_features(df: pd.DataFrame, date_col: Optional[str]) -> pd
 
     out["time_index"] = np.arange(len(out), dtype=float)
 
+    # Calendar features
     if date_col is not None:
         dt = pd.to_datetime(out[date_col], errors="coerce")
         out["dow"] = dt.dt.dayofweek.astype(float)
@@ -138,21 +134,34 @@ def engineer_exogenous_features(df: pd.DataFrame, date_col: Optional[str]) -> pd
         out["doy_sin"] = doy_sin
         out["doy_cos"] = doy_cos
 
+    # Spread
     if "BI_rate" in out.columns and "US_rate" in out.columns:
         out["rate_spread"] = out["BI_rate"] - out["US_rate"]
 
+    # Logs
     for c in ["GOLD", "SP500", "IHSG"]:
         if c in out.columns:
             out[f"log_{c}"] = safe_log(out[c])
 
+    # Differences
     diff_cols = ["OIL", "GOLD", "SP500", "IHSG", "VIX", "CPI", "BI_rate", "US_rate"]
     for c in get_existing_cols(out, diff_cols):
         out[f"diff_{c}"] = one_step_diff(out[c])
 
+    # Log Returns
     for c in ["GOLD", "SP500", "IHSG"]:
         if c in out.columns:
             out[f"logret_{c}"] = np.log(out[c] / out[c].shift(1))
 
+    # Rolling Volatility
+    for c in get_existing_cols(out, diff_cols):
+        diff_col = f"diff_{c}"
+        if diff_col in out.columns:
+            out[f"vol_{c}_5"] = out[diff_col].rolling(window=5, min_periods=1).std()
+            out[f"vol_{c}_21"] = out[diff_col].rolling(window=21, min_periods=1).std()
+
+    # Fill NaNs
+    out = out.fillna(method='bfill').fillna(0)
     return out
 
 
@@ -168,45 +177,56 @@ def prepare_sequences(
     val_split: float = 0.2,
 ) -> Tuple:
     """
-    Prepares 3D sequences for the GRU and splits into Train/Val.
+    Prepares 3D sequences. 
+    CRITICAL: Adds explicit lagged differences of the TARGET to the input features.
     """
     data = exog_df.copy()
     data[target_col] = pd.to_numeric(train_df[target_col], errors="coerce")
     
-    # Prepare Data
-    data_lagged_target = data.copy()
-    data_lagged_target[f"{target_col}_lag1"] = data[target_col].shift(1)
+    # --- NEW: Add Target Momentum Features ---
+    # Calculate log returns of the target
+    data[f"logret_{target_col}"] = np.log(data[target_col]).diff()
     
-    # Identify numeric columns
-    # Use select_dtypes to ensure we don't pick up datetime columns like 'Date'
+    # Create lags for target returns (Momentum indicators)
+    for lag in [1, 5, 21]:
+        data[f"logret_{target_col}_lag{lag}"] = data[f"logret_{target_col}"].shift(lag)
+    
+    # Create lagged target level (The anchor)
+    data[f"{target_col}_lag1"] = data[target_col].shift(1)
+    
+    # --- Feature Selection ---
+    # Select only numeric columns
     numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
-    feature_cols_raw = [c for c in numeric_cols if c != target_col]
-    final_feature_cols = [c for c in feature_cols_raw if c != f"{target_col}_lag1"] + [f"{target_col}_lag1"]
     
-    # Clean NaNs
-    clean_data = data_lagged_target.dropna(subset=[f"{target_col}_lag1"] + final_feature_cols)
+    # Define final feature list (exclude raw target, include engineered features)
+    feature_cols = [c for c in numeric_cols if c != target_col]
     
-    # Calculate Deltas
+    # Clean NaNs resulting from shifting/diffing
+    # We drop rows where ANY of our key features are NaN
+    clean_data = data.dropna(subset=[f"{target_col}_lag1"] + feature_cols)
+    
+    # Calculate Deltas (Target for prediction)
+    # We predict the change from t-1 to t
     y_raw_deltas = np.log(clean_data[target_col].values) - np.log(clean_data[f"{target_col}_lag1"].values)
-    X_raw = clean_data[final_feature_cols].values
+    X_raw = clean_data[feature_cols].values
     
-    # Split into Train/Validation BEFORE scaling to prevent leakage
+    # Split Train/Val (Time-series aware)
     split_idx = int(len(X_raw) * (1.0 - val_split))
     
     X_train_raw, X_val_raw = X_raw[:split_idx], X_raw[split_idx:]
     y_train_raw, y_val_raw = y_raw_deltas[:split_idx], y_raw_deltas[split_idx:]
     
-    # Fit Scalers on Training Data Only
-    scaler_X = StandardScaler()
-    scaler_y = StandardScaler()
+    # Fit RobustScalers on Training Data Only
+    scaler_X = RobustScaler()
+    scaler_y = RobustScaler()
     
     X_train_scaled = scaler_X.fit_transform(X_train_raw)
     y_train_scaled = scaler_y.fit_transform(y_train_raw.reshape(-1, 1)).flatten()
     
-    X_val_scaled = scaler_X.transform(X_val_raw) # Transform val with train stats
+    X_val_scaled = scaler_X.transform(X_val_raw)
     y_val_scaled = scaler_y.transform(y_val_raw.reshape(-1, 1)).flatten()
     
-    # Create Sequences
+    # Create Sequences Helper
     def make_seqs(X, y, lb):
         Xs, ys = [], []
         for i in range(lb, len(X)):
@@ -217,7 +237,7 @@ def prepare_sequences(
     X_train_seq, y_train_seq = make_seqs(X_train_scaled, y_train_scaled, lookback)
     X_val_seq, y_val_seq = make_seqs(X_val_scaled, y_val_scaled, lookback)
     
-    return X_train_seq, y_train_seq, X_val_seq, y_val_seq, scaler_X, scaler_y, final_feature_cols
+    return X_train_seq, y_train_seq, X_val_seq, y_val_seq, scaler_X, scaler_y, feature_cols
 
 
 # -----------------------------
@@ -244,10 +264,10 @@ class GRUModel(nn.Module):
 
 
 # -----------------------------
-# Training & Evaluation Logic
+# Training Logic
 # -----------------------------
 
-def train_model(model, train_loader, val_loader, epochs, lr, patience):
+def train_model(model, train_loader, val_loader, epochs, lr, patience, device):
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
     
@@ -259,11 +279,13 @@ def train_model(model, train_loader, val_loader, epochs, lr, patience):
         model.train()
         train_loss = 0
         for batch_X, batch_y in train_loader:
-            batch_X, batch_y = batch_X.to(DEVICE), batch_y.to(DEVICE)
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
             optimizer.zero_grad()
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
             loss.backward()
+            # Gradient clipping to prevent exploding gradients in deep RNNs
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             train_loss += loss.item()
             
@@ -272,7 +294,7 @@ def train_model(model, train_loader, val_loader, epochs, lr, patience):
         val_loss = 0
         with torch.no_grad():
             for batch_X, batch_y in val_loader:
-                batch_X, batch_y = batch_X.to(DEVICE), batch_y.to(DEVICE)
+                batch_X, batch_y = batch_X.to(device), batch_y.to(device)
                 outputs = model(batch_X)
                 loss = criterion(outputs, batch_y)
                 val_loss += loss.item()
@@ -304,8 +326,8 @@ def forecast_test_period(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     combined_exog: pd.DataFrame,
-    scaler_X: StandardScaler,
-    scaler_y: StandardScaler,
+    scaler_X: RobustScaler,
+    scaler_y: RobustScaler,
     feature_cols: List[str],
     target_col: str = TARGET_COL,
     lookback: int = LOOKBACK,
@@ -314,54 +336,78 @@ def forecast_test_period(
     preds = []
     
     full_exog = engineer_exogenous_features(combined_exog, infer_date_col(combined_exog))
-    lag_col = f"{target_col}_lag1"
+    
+    # Need to maintain the history of the target level AND the target log-returns
+    # because the feature_cols now include "logret_USDIDR_lagX"
     
     n_total = len(full_exog)
     levels_known = [np.nan] * (n_total + 1)
+    # We also need to store returns for lagging
+    returns_known = [np.nan] * (n_total + 1)
+    
+    # Initialize history from training data
     for i in range(len(train_df)):
-        levels_known[i] = pd.to_numeric(train_df[target_col], errors="coerce").iloc[i]
+        lvl = pd.to_numeric(train_df[target_col], errors="coerce").iloc[i]
+        levels_known[i] = lvl
+        if i > 0:
+            returns_known[i] = np.log(lvl) - np.log(levels_known[i-1])
+            
+    lag_col = f"{target_col}_lag1"
         
-    def get_scaled_row(t: int, current_levels: List[float]) -> np.ndarray:
+    def get_scaled_row(t: int, current_levels: List[float], current_returns: List[float]) -> np.ndarray:
         exog_row = full_exog.iloc[t]
         row_dict = {}
         for c in feature_cols:
             if c == lag_col:
                 row_dict[c] = current_levels[t-1]
+            elif "logret_USDIDR_lag" in c: # Handle our new dynamic features
+                # Parse lag number: e.g., "logret_USDIDR_lag1" -> 1
+                try:
+                    lag_num = int(c.split('_')[-1].replace('lag', ''))
+                    row_dict[c] = current_returns[t-lag_num]
+                except:
+                    row_dict[c] = 0.0
             else:
                 row_dict[c] = exog_row.get(c, 0.0)
         
         row_df = pd.DataFrame([row_dict], columns=feature_cols)
         return scaler_X.transform(row_df.to_numpy())[0]
 
+    # Initialize window with tail of training data
     train_end_idx = len(train_df) - 1
     test_start_idx = len(train_df)
     
     current_window = []
     start_window_idx = train_end_idx - lookback + 1
     
-    # Initialize window with tail of training data
     for i in range(start_window_idx, train_end_idx + 1):
-        row_scaled = get_scaled_row(i, levels_known)
+        row_scaled = get_scaled_row(i, levels_known, returns_known)
         current_window.append(row_scaled)
         
     for i in range(len(test_df)):
         t = test_start_idx + i
         
-        # Get input for time t
-        input_row_t = get_scaled_row(t, levels_known)
+        input_row_t = get_scaled_row(t, levels_known, returns_known)
         current_window.append(input_row_t)
         if len(current_window) > lookback:
             current_window.pop(0)
             
-        X_tensor = torch.tensor([current_window], dtype=torch.float32).to(DEVICE)
+        X_array = np.array(current_window, dtype=np.float32)
+        X_tensor = torch.from_numpy(X_array).unsqueeze(0).to(DEVICE)
+        
         with torch.no_grad():
             pred_scaled_delta = model(X_tensor)
             pred_scaled_delta = pred_scaled_delta.cpu().numpy()[0, 0]
             
         pred_raw_delta = scaler_y.inverse_transform([[pred_scaled_delta]])[0, 0]
+        
+        # Update recursive state
         level_t = levels_known[t-1] * np.exp(pred_raw_delta)
+        returns_t = np.log(level_t) - np.log(levels_known[t-1])
+        
         preds.append(level_t)
         levels_known[t] = level_t
+        returns_known[t] = returns_t
         
     return np.array(preds, dtype=float)
 
@@ -378,7 +424,7 @@ def run_pipeline(
 ) -> None:
     set_seed(RANDOM_STATE)
     
-    # Load data
+    # Load Data
     train_raw = pd.read_csv(train_csv)
     test_raw = pd.read_csv(test_csv)
     actual_test_raw = pd.read_csv(actual_test_csv) if actual_test_csv else None
@@ -392,12 +438,11 @@ def run_pipeline(
     train_exog = train_raw.drop(columns=[TARGET_COL], errors="ignore")
     test_exog = test_raw.copy()
 
-    # Prepare Features and Sequences
+    # Feature Engineering
     combined_exog = pd.concat([train_exog, test_exog], ignore_index=True)
-    effective_date_col = train_date_col
-    combined_exog = engineer_exogenous_features(combined_exog, date_col=effective_date_col)
+    combined_exog = engineer_exogenous_features(combined_exog, date_col=train_date_col)
     
-    # Prepare train/val splits
+    # Prepare Sequences
     X_train, y_train, X_val, y_val, scaler_X, scaler_y, feature_cols = prepare_sequences(
         train_df=train_raw,
         exog_df=combined_exog.iloc[: len(train_raw)].reset_index(drop=True),
@@ -406,35 +451,20 @@ def run_pipeline(
         val_split=0.2
     )
     
-    print(f"Training samples: {len(X_train)} | Validation samples: {len(X_val)}")
-    print(f"Features: {len(feature_cols)}")
-    
-    # Create Loaders
-    train_dataset = torch.utils.data.TensorDataset(
-        torch.tensor(X_train, dtype=torch.float32),
-        torch.tensor(y_train, dtype=torch.float32).unsqueeze(1)
-    )
-    val_dataset = torch.utils.data.TensorDataset(
-        torch.tensor(X_val, dtype=torch.float32),
-        torch.tensor(y_val, dtype=torch.float32).unsqueeze(1)
-    )
-    
+    print(f"Data Prepared: Train={len(X_train)}, Val={len(X_val)}, Features={len(feature_cols)}")
+
     # -----------------------------
-    # Hyperparameter Search Loop
+    # Optuna Objective (Aggressive)
     # -----------------------------
-    keys, values = zip(*HP_GRID.items())
-    combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
-    
-    print(f"Starting Grid Search with {len(combinations)} combinations...")
-    
-    best_score = float('inf')
-    best_params = None
-    best_model_state = None
-    
-    for params in combinations:
-        print(f"Testing params: {params}")
+    def objective(trial: optuna.Trial) -> float:
+        params = {
+            "hidden_size": trial.suggest_categorical("hidden_size", [256, 512, 1024, 2048, 4096]),
+            "num_layers": trial.suggest_categorical("num_layers", [4, 8, 16, 32]),
+            "dropout": trial.suggest_float("dropout", 0.2, 0.5),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True),
+            "batch_size": trial.suggest_categorical("batch_size", [32, 64])
+        }
         
-        # Init Model
         model = GRUModel(
             input_size=len(feature_cols),
             hidden_size=params['hidden_size'],
@@ -442,37 +472,70 @@ def run_pipeline(
             dropout=params['dropout']
         ).to(DEVICE)
         
-        # Loaders
-        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
-        
-        # Train
-        val_loss = train_model(
-            model, train_loader, val_loader, 
-            epochs=EPOCHS, 
-            lr=params['learning_rate'], 
-            patience=EARLY_STOPPING_PATIENCE
+        train_dataset = torch.utils.data.TensorDataset(
+            torch.tensor(X_train, dtype=torch.float32),
+            torch.tensor(y_train, dtype=torch.float32).unsqueeze(1)
+        )
+        val_dataset = torch.utils.data.TensorDataset(
+            torch.tensor(X_val, dtype=torch.float32),
+            torch.tensor(y_val, dtype=torch.float32).unsqueeze(1)
         )
         
-        print(f"Val Loss: {val_loss:.6f}")
+        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=params['batch_size'], shuffle=True)
+        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=params['batch_size'], shuffle=False)
         
-        if val_loss < best_score:
-            best_score = val_loss
-            best_params = params
-            best_model_state = model.state_dict()
-            print(">>> New best model found!")
+        val_loss = train_model(
+            model, train_loader, val_loader, 
+            epochs=50, # Faster trials
+            lr=params['learning_rate'], 
+            patience=10,
+            device=DEVICE
+        )
+        
+        return val_loss
 
-    print(f"\nBest Hyperparameters: {best_params}")
-    print(f"Best Validation Loss: {best_score:.6f}")
+    # Run Optimization
+    print("Starting Aggressive Optuna Search...")
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=OPTUNA_TRIALS, timeout=OPTUNA_TIMEOUT)
     
-    # Load Best Model
+    print("\nBest Trial:")
+    print(f"  Value (Loss): {study.best_value:.6f}")
+    print(f"  Params: {study.best_params}")
+    
+    best_params = study.best_params
+
+    # Final Training
+    X_full = np.concatenate((X_train, X_val), axis=0)
+    y_full = np.concatenate((y_train, y_val), axis=0)
+    
+    full_dataset = torch.utils.data.TensorDataset(
+        torch.tensor(X_full, dtype=torch.float32),
+        torch.tensor(y_full, dtype=torch.float32).unsqueeze(1)
+    )
+    full_loader = torch.utils.data.DataLoader(full_dataset, batch_size=best_params['batch_size'], shuffle=True)
+    
+    val_dataset = torch.utils.data.TensorDataset(
+        torch.tensor(X_val, dtype=torch.float32),
+        torch.tensor(y_val, dtype=torch.float32).unsqueeze(1)
+    )
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=best_params['batch_size'], shuffle=False)
+    
     final_model = GRUModel(
         input_size=len(feature_cols),
         hidden_size=best_params['hidden_size'],
         num_layers=best_params['num_layers'],
         dropout=best_params['dropout']
     ).to(DEVICE)
-    final_model.load_state_dict(best_model_state)
+    
+    print("Training final model on full dataset...")
+    train_model(
+        final_model, full_loader, val_loader,
+        epochs=EPOCHS,
+        lr=best_params['learning_rate'],
+        patience=EARLY_STOPPING_PATIENCE,
+        device=DEVICE
+    )
 
     # Forecast
     test_preds = forecast_test_period(
@@ -487,7 +550,7 @@ def run_pipeline(
         lookback=LOOKBACK,
     )
 
-    # Save Submission
+    # Save
     submission = pd.DataFrame({TARGET_COL: test_preds})
     test_date_col = infer_date_col(test_raw)
     if test_date_col and test_date_col in test_raw.columns:
@@ -503,25 +566,16 @@ def run_pipeline(
             raise ValueError(f"actual_test_csv must contain target column '{TARGET_COL}'.")
         actual = pd.to_numeric(actual_test_raw[TARGET_COL], errors="coerce").to_numpy(dtype=float)
         min_len = min(len(actual), len(test_preds))
-        actual = actual[:min_len]
-        test_preds = test_preds[:min_len]
-        
-        # Fix for sklearn 1.4+
-        rmse = np.sqrt(mean_squared_error(actual, test_preds))
+        rmse = np.sqrt(mean_squared_error(actual[:min_len], test_preds[:min_len]))
         print(f"True test RMSE: {rmse:.4f}")
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="USDIDR GRU forecasting template")
-    p.add_argument("--train_csv", type=Path, required=True, help="Path to training CSV")
-    p.add_argument("--test_csv", type=Path, required=True, help="Path to test CSV")
-    p.add_argument("--submission_csv", type=Path, required=True, help="Output submission CSV")
-    p.add_argument(
-        "--actual_test_csv",
-        type=Path,
-        default=None,
-        help="Optional CSV with actual test USDIDR for honest benchmarking",
-    )
+    p = argparse.ArgumentParser(description="USDIDR GRU forecasting with Optuna")
+    p.add_argument("--train_csv", type=Path, required=True)
+    p.add_argument("--test_csv", type=Path, required=True)
+    p.add_argument("--submission_csv", type=Path, required=True)
+    p.add_argument("--actual_test_csv", type=Path, default=None)
     return p.parse_args()
 
 
