@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shared import load_train, temporal_split, evaluate_all, plot_actual_vs_predicted
+from shared import load_train, load_test, temporal_split, evaluate_all, plot_actual_vs_predicted
 from model_b.model import GRUModel
 from model_b.features import prepare_raw_features
 
@@ -23,36 +23,42 @@ def run_scenario(scenario_name, train_ratio):
 
     df = load_train()
     train_df, test_df = temporal_split(df, train_ratio)
+    n_train_raw = len(train_df)
 
-    train_feat = prepare_raw_features(train_df)
-    test_feat = prepare_raw_features(test_df)
+    full_df = pd.concat([train_df, test_df], ignore_index=True)
+    full_feat = prepare_raw_features(full_df)
 
-    has_target = "USDIDR" in train_feat.columns
-    feature_cols = [c for c in train_feat.columns if c != "USDIDR"]
-    y_train = train_feat["USDIDR"].values if has_target else None
-    y_test = test_feat["USDIDR"].values if has_target else None
-    X_train = train_feat[feature_cols].values
-    X_test = test_feat[feature_cols].values
+    n_nan = len(full_df) - len(full_feat)
+    n_train_feat = n_train_raw - n_nan
 
-    print(f"  Raw features: {len(feature_cols)}")
-    print(f"  Train size: {len(train_df)}, Test size: {len(test_df)}")
+    feature_cols = [c for c in full_feat.columns if c != "USDIDR"]
+    y_full = full_feat["USDIDR"].values
+    X_full = full_feat[feature_cols].values
+
+    X_train = X_full[:n_train_feat]
+    y_train = y_full[:n_train_feat]
+    X_test = X_full[n_train_feat:]
+    y_test = y_full[n_train_feat:]
 
     lookback = 30
+
+    print(f"  Train: {len(train_df)} -> {len(X_train)} rows")
+    print(f"  Test: {len(test_df)} -> {len(X_test)} rows")
+    print(f"  Raw features: {len(feature_cols)}")
+
     model = GRUModel(lookback=lookback, hidden_size=32, dropout=0.1)
     model.fit(X_train, y_train)
 
     y_pred = model.predict(X_test)
 
     test_dates = test_df["Date"].iloc[lookback:].reset_index(drop=True)
-    y_test_aligned = y_test[lookback:]
-    y_pred_aligned = y_pred
-
-    min_len = min(len(y_test_aligned), len(y_pred_aligned), len(test_dates))
-    y_test_aligned = y_test_aligned[:min_len]
-    y_pred_aligned = y_pred_aligned[:min_len]
+    y_test_arr = y_test[lookback:]
+    min_len = min(len(y_test_arr), len(y_pred), len(test_dates))
+    y_test_arr = y_test_arr[:min_len]
+    y_pred = y_pred[:min_len]
     test_dates = test_dates.iloc[:min_len]
 
-    metrics = evaluate_all(y_test_aligned, y_pred_aligned)
+    metrics = evaluate_all(y_test_arr, y_pred)
     print(f"\n  Results:")
     for k, v in metrics.items():
         print(f"    {k:>6}: {v:.4f}")
@@ -63,8 +69,8 @@ def run_scenario(scenario_name, train_ratio):
 
     pred_df = pd.DataFrame({
         "date": test_dates,
-        "y_true": y_test_aligned,
-        "y_pred": y_pred_aligned,
+        "y_true": y_test_arr,
+        "y_pred": y_pred,
     })
     pred_path = RESULTS_DIR / f"predictions_{scenario_name.replace('/', '_')}.csv"
     pred_df.to_csv(pred_path, index=False)
@@ -74,8 +80,8 @@ def run_scenario(scenario_name, train_ratio):
         train_dates=train_df["Date"],
         train_actual=train_df["USDIDR"],
         test_dates=test_dates,
-        test_actual=y_test_aligned,
-        test_pred=y_pred_aligned,
+        test_actual=y_test_arr,
+        test_pred=y_pred,
         model_name="GRU",
         scenario=scenario_name,
         save_path=str(plot_path),

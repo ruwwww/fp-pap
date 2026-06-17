@@ -12,11 +12,17 @@ from model_a.model import ElasticNetPAC
 from model_a.features import build_features
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
-SCENARIOS = {
-    "80/20": 0.8,
-    "70/30": 0.7,
-    "60/40": 0.6,
-}
+SCENARIOS = {"80/20": 0.8, "70/30": 0.7, "60/40": 0.6}
+
+
+def load_best_params(scenario_name):
+    best_path = RESULTS_DIR / "best_params.json"
+    if not best_path.exists():
+        return {}
+    with open(best_path) as f:
+        data = json.load(f)
+    entry = data.get(scenario_name, {})
+    return entry.get("params", {})
 
 
 def run_scenario(scenario_name, train_ratio):
@@ -26,15 +32,27 @@ def run_scenario(scenario_name, train_ratio):
 
     df = load_train()
     train_df, test_df = temporal_split(df, train_ratio)
+    n_train_raw = len(train_df)
 
-    print(f"  Train size: {len(train_df)}, Test size: {len(test_df)}")
+    full_df = pd.concat([train_df, test_df], ignore_index=True)
+    X_full, y_full = build_features(full_df)
 
-    X_train, y_train = build_features(train_df)
-    X_test, y_test = build_features(test_df)
+    n_nan = len(full_df) - len(X_full)
+    n_train_feat = n_train_raw - n_nan
 
+    X_train, y_train = X_full.iloc[:n_train_feat], y_full.iloc[:n_train_feat]
+    X_test, y_test = X_full.iloc[n_train_feat:], y_full.iloc[n_train_feat:]
+
+    print(f"  Train: {len(train_df)} -> {len(X_train)} rows (dropped {n_nan} NaN)")
+    print(f"  Test: {len(test_df)} -> {len(X_test)} rows")
     print(f"  Features: {X_train.shape[1]}")
 
-    model = ElasticNetPAC(alpha=1.0, l1_ratio=0.5)
+    best = load_best_params(scenario_name)
+    alpha = best.get("alpha", 1.0)
+    l1_ratio = best.get("l1_ratio", 0.5)
+    print(f"  Params: alpha={alpha:.6f}, l1_ratio={l1_ratio:.4f}")
+
+    model = ElasticNetPAC(alpha=alpha, l1_ratio=l1_ratio)
     model.fit(X_train, y_train)
 
     y_pred = model.predict(X_test)
@@ -44,12 +62,10 @@ def run_scenario(scenario_name, train_ratio):
     for k, v in metrics.items():
         print(f"    {k:>6}: {v:.4f}")
 
-    # Save metrics
     metrics_path = RESULTS_DIR / f"metrics_{scenario_name.replace('/', '_')}.json"
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)
 
-    # Save predictions
     test_dates = test_df["Date"].reset_index(drop=True)
     pred_df = pd.DataFrame({
         "date": test_dates,
@@ -59,7 +75,6 @@ def run_scenario(scenario_name, train_ratio):
     pred_path = RESULTS_DIR / f"predictions_{scenario_name.replace('/', '_')}.csv"
     pred_df.to_csv(pred_path, index=False)
 
-    # Plot
     plot_path = RESULTS_DIR / f"actual_vs_predicted_{scenario_name.replace('/', '_')}.png"
     plot_actual_vs_predicted(
         train_dates=train_df["Date"],
@@ -72,18 +87,12 @@ def run_scenario(scenario_name, train_ratio):
         save_path=str(plot_path),
     )
 
-    return {
-        "scenario": scenario_name,
-        "train_ratio": train_ratio,
-        **metrics,
-        "n_features": X_train.shape[1],
-    }
+    return {"scenario": scenario_name, "train_ratio": train_ratio, **metrics}
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run Model A experiments")
-    parser.add_argument("--scenario", type=str, default=None,
-                        help="Run a single scenario (e.g. 80/20, 70/30, 60/40)")
+    parser.add_argument("--scenario", type=str, default=None)
     args = parser.parse_args()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -102,8 +111,7 @@ def main():
         all_results.append(result)
 
     summary_df = pd.DataFrame(all_results)
-    summary_path = RESULTS_DIR / "summary.csv"
-    summary_df.to_csv(summary_path, index=False)
+    summary_df.to_csv(RESULTS_DIR / "summary.csv", index=False)
 
     print(f"\n{'='*60}")
     print("  Summary")

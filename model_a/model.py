@@ -1,5 +1,7 @@
+import warnings
 import numpy as np
 from sklearn.linear_model import ElasticNet
+from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.stattools import pacf
 
 
@@ -7,7 +9,8 @@ class ElasticNetPAC:
     def __init__(self, alpha=1.0, l1_ratio=0.5):
         self.alpha = alpha
         self.l1_ratio = l1_ratio
-        self.model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=10000)
+        self.model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, max_iter=100000, tol=1e-4)
+        self._scaler = StandardScaler()
         self.pacf_values = None
         self.sample_weights = None
 
@@ -25,12 +28,19 @@ class ElasticNetPAC:
         return weights
 
     def fit(self, X, y):
-        weights = self._compute_pac_weights(np.asarray(y, dtype=float))
-        self.model.fit(X, y, sample_weight=weights)
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=float)
+        X_s = self._scaler.fit_transform(X)
+        weights = self._compute_pac_weights(y)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=Warning)
+            self.model.fit(X_s, y, sample_weight=weights)
         return self
 
     def predict(self, X):
-        return self.model.predict(X)
+        X = np.asarray(X, dtype=float)
+        X_s = self._scaler.transform(X)
+        return self.model.predict(X_s)
 
     def get_params(self):
         return {

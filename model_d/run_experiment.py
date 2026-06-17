@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shared import load_train, temporal_split, evaluate_all, plot_actual_vs_predicted
+from shared import load_train, load_test, temporal_split, evaluate_all, plot_actual_vs_predicted
 from model_d.model import HybridRidgeGRU
 from model_d.features import build_features_ridge, prepare_gru_raw
 
@@ -23,48 +23,49 @@ def run_scenario(scenario_name, train_ratio):
 
     df = load_train()
     train_df, test_df = temporal_split(df, train_ratio)
+    n_train_raw = len(train_df)
 
-    Xr_train, y_train = build_features_ridge(train_df)
-    Xr_test, y_test = build_features_ridge(test_df)
-    seq_train = prepare_gru_raw(train_df)
-    seq_test = prepare_gru_raw(test_df)
+    full_df = pd.concat([train_df, test_df], ignore_index=True)
+    Xr_full, y_full = build_features_ridge(full_df)
+    seq_full = prepare_gru_raw(full_df)
 
-    has_target = "USDIDR" in seq_train.columns
-    seq_cols = [c for c in seq_train.columns if c != "USDIDR"]
-    y_seq_train = seq_train["USDIDR"].values if has_target else None
-    y_seq_test = seq_test["USDIDR"].values if has_target else None
-    X_seq_train = seq_train[seq_cols].values
-    X_seq_test = seq_test[seq_cols].values
+    n_nan_ridge = len(full_df) - len(Xr_full)
+    n_nan_seq = len(full_df) - len(seq_full)
+    n_train_ridge = n_train_raw - n_nan_ridge
+    n_train_seq = n_train_raw - n_nan_seq
 
-    lookback = 30
+    seq_cols = [c for c in seq_full.columns if c != "USDIDR"]
+
+    Xr_train = Xr_full.iloc[:n_train_ridge]
+    Xr_test = Xr_full.iloc[n_train_ridge:]
+    y_train_r = y_full.iloc[:n_train_ridge]
+    y_test_r = y_full.iloc[n_train_ridge:]
+
+    X_seq_train = seq_full[seq_cols].values[:n_train_seq]
+    X_seq_test = seq_full[seq_cols].values[n_train_seq:]
 
     min_train = min(len(Xr_train), len(X_seq_train))
-    Xr_train, X_seq_train, y_train = Xr_train.iloc[:min_train], X_seq_train[:min_train], y_train.iloc[:min_train]
-    X_seq_train = np.asarray(X_seq_train, dtype=float)
-
     min_test = min(len(Xr_test), len(X_seq_test))
-    Xr_test = Xr_test.iloc[:min_test]
-    X_seq_test = X_seq_test[:min_test]
-    y_test_aligned = y_test.iloc[:min_test] if hasattr(y_test, 'iloc') else y_test[:min_test]
 
-    print(f"  Train size: {len(train_df)}, Test size: {len(test_df)}")
-    print(f"  Ridge features: {Xr_train.shape[1]}, GRU features: {X_seq_train.shape[1]}")
+    print(f"  Ridge: train={len(Xr_train)}, test={len(Xr_test)}, features={Xr_train.shape[1]}")
+    print(f"  GRU:   train={len(X_seq_train)}, test={len(X_seq_test)}, features={X_seq_train.shape[1]}")
 
-    model = HybridRidgeGRU(lookback=lookback, hidden_size=32, dropout=0.1)
-    model.fit(Xr_train, X_seq_train, y_train.values if hasattr(y_train, 'values') else y_train)
+    model = HybridRidgeGRU(lookback=30, hidden_size=32, dropout=0.1)
+    model.fit(
+        Xr_train.iloc[:min_train],
+        X_seq_train[:min_train],
+        y_train_r.iloc[:min_train].values,
+    )
 
-    y_pred = model.predict(Xr_test, X_seq_test)
+    y_pred = model.predict(Xr_test.iloc[:min_test], X_seq_test[:min_test])
 
-    test_dates = test_df["Date"].iloc[lookback:].reset_index(drop=True)
-    y_test_arr = np.asarray(y_test_aligned)[lookback:]
-    y_pred_aligned = y_pred[:len(y_test_arr)]
+    y_test = y_test_r.iloc[:min_test].values
+    min_len = min(len(y_test), len(y_pred))
+    y_test = y_test[:min_len]
+    y_pred = y_pred[:min_len]
+    test_dates = test_df["Date"].reset_index(drop=True).iloc[:min_len]
 
-    min_len = min(len(y_test_arr), len(y_pred_aligned), len(test_dates))
-    y_test_arr = y_test_arr[:min_len]
-    y_pred_aligned = y_pred_aligned[:min_len]
-    test_dates = test_dates.iloc[:min_len]
-
-    metrics = evaluate_all(y_test_arr, y_pred_aligned)
+    metrics = evaluate_all(y_test, y_pred)
     print(f"\n  Results:")
     for k, v in metrics.items():
         print(f"    {k:>6}: {v:.4f}")
@@ -74,9 +75,9 @@ def run_scenario(scenario_name, train_ratio):
         json.dump(metrics, f, indent=2)
 
     pred_df = pd.DataFrame({
-        "date": test_dates,
-        "y_true": y_test_arr,
-        "y_pred": y_pred_aligned,
+        "date": test_dates.values,
+        "y_true": y_test,
+        "y_pred": y_pred,
     })
     pred_path = RESULTS_DIR / f"predictions_{scenario_name.replace('/', '_')}.csv"
     pred_df.to_csv(pred_path, index=False)
@@ -86,8 +87,8 @@ def run_scenario(scenario_name, train_ratio):
         train_dates=train_df["Date"],
         train_actual=train_df["USDIDR"],
         test_dates=test_dates,
-        test_actual=y_test_arr,
-        test_pred=y_pred_aligned,
+        test_actual=y_test,
+        test_pred=y_pred,
         model_name="HybridRidgeGRU",
         scenario=scenario_name,
         save_path=str(plot_path),

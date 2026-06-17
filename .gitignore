@@ -21,9 +21,12 @@ env/
 data/processed/
 data/submissions/
 
-# ── Results (generated, not committed by default) ────
-results/models/
-results/search/
+# ── Results (all generated outputs) ──────────────────
+results/
+model_a/results/
+model_b/results/
+model_c/results/
+model_d/results/
 mlruns/
 
 # ── Archives ────────────────────────────────────────
