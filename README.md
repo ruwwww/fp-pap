@@ -1,192 +1,85 @@
-# ⏱️ EAS Time Series Forecasting — Project Environment
+# USDIDR Forecasting — ElasticNet Template
 
 > **Mata Kuliah**: Pemodelan dan Analisis Prediktif (PAP)
-> **Deadline Kaggle**: Senin, 22 Juni 00:00 WIB
-> **Deadline Pengumpulan**: Senin, 22 Juni 12:00 WIB
+> **Kaggle Deadline**: Senin, 22 Juni 00:00 WIB
+> **Submission Deadline**: Senin, 22 Juni 12:00 WIB
 
 ---
 
-## 🚀 Quick Start
-
-### 1. Setup Environment
+## Quick Start
 
 ```bash
-# Clone / navigate to project
-cd "C:\kuliahh maseh\pap\eas"
-
-# Create virtual environment
+# Setup
 python -m venv venv
-venv\Scripts\activate       # Windows
-# source venv/bin/activate  # Linux/Mac
-
-# Install dependencies
+venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 
-# Install project as local package (enables clean imports)
-pip install -e .
+# Run (with hyperparameter search)
+python elasticnet_forecast_template.py \
+    --train_csv data_train.csv \
+    --test_csv data_test.csv \
+    --submission_csv submission.csv
+
+# Run (with benchmark against actual test labels)
+python elasticnet_forecast_template.py \
+    --train_csv data_train.csv \
+    --test_csv data_test.csv \
+    --submission_csv submission.csv \
+    --actual_test_csv submission_real.csv
 ```
 
-### 2. Configure Your Dataset
-
-```yaml
-# config/config.yaml  ← EDIT THESE:
-project:
-  target_column: "your_target_column"   # ← column to predict
-  date_column: "your_date_column"       # ← datetime column
-```
-
-### 3. Put Data in `data/raw/`
-
-```bash
-# Option A: Download manually from Kaggle and place CSV here
-data/raw/train.csv
-data/raw/test.csv
-
-# Option B: Use Kaggle API
-pip install kaggle
-# Put your kaggle.json at C:\Users\<you>\.kaggle\kaggle.json
-python -c "
-from src.data.loader import DataLoader
-loader = DataLoader()
-loader.download_kaggle(competition='<competition-name>')
-"
-```
-
-### 4. Run EDA First
-
-```bash
-jupyter notebook notebooks/01_EDA.ipynb
-```
-
-### 5. Run Full Benchmark (all models, all scenarios)
-
-```bash
-# Via notebook:
-jupyter notebook notebooks/04_Benchmarking.ipynb
-
-# Or via CLI:
-python run_benchmark.py --data data/raw/train.csv --target value --date date
-```
-
-### 6. Generate Forecast
-
-```bash
-jupyter notebook notebooks/05_Forecasting.ipynb
-```
+Output is `submission.csv` with columns `Date,USDIDR`.
 
 ---
 
-## 📋 Model Assignment (sesuai instruksi)
+## What It Does
 
-| Model | Type | Default | Sesuai instruksi |
-|-------|------|---------|-----------------|
-| **Model A** | Machine Learning | XGBoost | Pilih 1 ML model |
-| **Model B** | Deep Learning | LSTM | Pilih 1 DL model (LSTM/GRU/CNN/RNN) |
-| **Model C** | Ensemble base | XGBoost | Boleh sama dengan A atau B |
-| **Model D** | Ensemble base | LSTM | **WAJIB** DL (LSTM/GRU/CNN/RNN) |
-| **Ensemble** | C + D combined | VotingEnsemble | Evaluasi sebagai 1 model |
-
----
-
-## 🎛️ Enabling / Disabling Models
-
-Edit `config/models_config.yaml`:
-
-```yaml
-ml_models:
-  xgboost:
-    enabled: true   # ← set false to skip
-  lightgbm:
-    enabled: false  # ← set true to include
-```
+1. Reads train CSV (with `USDIDR` column) and test CSV (features only)
+2. Engineers exogenous features (macro rates, spreads, calendar, log-transforms, lags)
+3. Builds supervised dataset: predicts **daily log-return** of USDIDR
+4. Tunes ElasticNet via `TimeSeriesSplit` cross-validation
+5. Recursively forecasts test period (each prediction feeds into the next day's lag features)
+6. Saves submission CSV
 
 ---
 
-## 📊 Output Structure
+## Target Formulation
 
-After benchmarking, you'll find:
+The model predicts **log-returns**:
 
+```python
+y_t = log(USDIDR_t) - log(USDIDR_{t-1})
 ```
-results/
-├── plots/
-│   ├── model_A_80_20.png           # Actual vs Predicted plots
-│   ├── model_B_80_20.png
-│   ├── ensemble_80_20.png
-│   ├── heatmap_RMSE.png            # Model × Scenario heatmaps
-│   ├── heatmap_MAPE.png
-│   └── results_table.png           # Rekapitulasi table
-└── metrics/
-    └── results_summary.csv         # All metrics, all models, all scenarios
+
+Reconstructed as:
+
+```python
+USDIDR_{t+1} = USDIDR_t * exp(y_pred)
 ```
+
+This avoids compounding error that plagues level-diff targets in recursive forecasting.
 
 ---
 
-## 🔍 MLflow Experiment Tracking
+## Anti-Leakage Checklist
 
-```bash
-mlflow ui --port 5000
-# → Open http://localhost:5000
-```
+- [ ] Exogenous features use only current/past values (`shift(n)` where `n >= 1`)
+- [ ] Target context features use only past USDIDR history
+- [ ] Test USDIDR values are never seen during training or tuning
+- [ ] CV uses `TimeSeriesSplit` (no random shuffling)
+- [ ] `actual_test_csv` is only used for final RMSE, never fed into the model
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 eas/
-├── config/                  # YAML configuration
-├── src/                     # Core library
-│   ├── data/                # Loading & preprocessing
-│   ├── features/            # Feature engineering
-│   ├── models/              # ML, DL, Ensemble models
-│   ├── evaluation/          # Metrics (RMSE, MAPE, MAE, R²)
-│   └── visualization/       # Plot functions
-├── benchmarking/            # BenchmarkRunner + FutureForecaster
-├── notebooks/               # Jupyter workflow
-├── data/                    # raw/, processed/, submissions/
-├── results/                 # plots/, metrics/, models/
-├── docs/                    # Documentation
-│   └── AI_AGENTS_GUIDE.md  # Guide for AI agents
-├── run_benchmark.py         # CLI entrypoint
+├── elasticnet_forecast_template.py   # Single self-contained script
+├── data_train.csv                     # Training data (not tracked)
+├── data_test.csv                      # Test features (not tracked)
+├── submission.csv                     # Generated submission
+├── submission_real.csv                # Actual test labels (optional)
 ├── requirements.txt
-└── setup.py
+└── README.md
 ```
-
----
-
-## ⚠️ Anti-Leakage Checklist
-
-Before submitting, verify:
-
-- [ ] All rolling features use `shift(1)` before `.rolling()`
-- [ ] All lag features use `shift(n)` where `n ≥ 1`
-- [ ] Scalers fit ONLY on training data (`preprocessor.fit_transform(train)`)
-- [ ] Train/Test split is **temporal** (first N rows = train, not random)
-- [ ] No future data used in any normalization or aggregation
-
----
-
-## 🛠️ Common Commands
-
-```bash
-# Quick ML-only benchmark (skip DL for speed)
-python run_benchmark.py --data data/raw/train.csv --target value --date date --skip lstm,gru,cnn_lstm
-
-# Test single model
-python run_benchmark.py --data data/raw/train.csv --target value --date date --only xgboost
-
-# No MLflow
-python run_benchmark.py --data data/raw/train.csv --no-mlflow
-```
-
----
-
-## 📚 Documentation
-
-- **[AI Agent Guide](docs/AI_AGENTS_GUIDE.md)** — Architecture, rules, task examples for AI agents
-- **[models_config.yaml](config/models_config.yaml)** — All model parameters
-- **[config.yaml](config/config.yaml)** — Project settings
-
----
-
-*Generated for EAS PAP — Time Series Forecasting Project*
