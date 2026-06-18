@@ -175,6 +175,8 @@ def prepare_sequences(
     target_col: str = TARGET_COL,
     lookback: int = LOOKBACK,
     val_split: float = 0.2,
+    date_col: Optional[str] = None,
+
 ) -> Tuple:
     """
     Prepares 3D sequences. 
@@ -207,14 +209,16 @@ def prepare_sequences(
     
     # Calculate Deltas (Target for prediction)
     # We predict the change from t-1 to t
-    y_raw_deltas = np.log(clean_data[target_col].values) - np.log(clean_data[f"{target_col}_lag1"].values)
+    # y_raw_deltas = np.log(clean_data[target_col].values) - np.log(clean_data[f"{target_col}_lag1"].values)
+    y_raw_levels = clean_data[target_col].values
     X_raw = clean_data[feature_cols].values
     
     # Split Train/Val (Time-series aware)
-    split_idx = int(len(X_raw) * (1.0 - val_split))
+    date_col_vals = clean_data.index if date_col is None else pd.to_datetime(clean_data[date_col])
+    split_idx = (date_col_vals < "2021-01-01").sum()
     
     X_train_raw, X_val_raw = X_raw[:split_idx], X_raw[split_idx:]
-    y_train_raw, y_val_raw = y_raw_deltas[:split_idx], y_raw_deltas[split_idx:]
+    y_train_raw, y_val_raw = y_raw_levels[:split_idx], y_raw_levels[split_idx:]
     
     # Fit RobustScalers on Training Data Only
     scaler_X = RobustScaler()
@@ -269,7 +273,7 @@ class GRUModel(nn.Module):
 
 def train_model(model, train_loader, val_loader, epochs, lr, patience, device):
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     
     best_val_loss = float('inf')
     patience_counter = 0
@@ -321,97 +325,44 @@ def train_model(model, train_loader, val_loader, epochs, lr, patience, device):
 # Recursive forecasting
 # -----------------------------
 
-def forecast_test_period(
-    model: nn.Module,
-    train_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    combined_exog: pd.DataFrame,
-    scaler_X: RobustScaler,
-    scaler_y: RobustScaler,
-    feature_cols: List[str],
-    target_col: str = TARGET_COL,
-    lookback: int = LOOKBACK,
-) -> np.ndarray:
+def forecast_test_period(model, train_df, test_df, combined_exog,
+                          scaler_X, scaler_y, feature_cols,
+                          target_col=TARGET_COL, lookback=LOOKBACK):
     model.eval()
     preds = []
-    
+
     full_exog = engineer_exogenous_features(combined_exog, infer_date_col(combined_exog))
     
-    # Need to maintain the history of the target level AND the target log-returns
-    # because the feature_cols now include "logret_USDIDR_lagX"
-    
-    n_total = len(full_exog)
-    levels_known = [np.nan] * (n_total + 1)
-    # We also need to store returns for lagging
-    returns_known = [np.nan] * (n_total + 1)
-    
-    # Initialize history from training data
-    for i in range(len(train_df)):
-        lvl = pd.to_numeric(train_df[target_col], errors="coerce").iloc[i]
-        levels_known[i] = lvl
-        if i > 0:
-            returns_known[i] = np.log(lvl) - np.log(levels_known[i-1])
-            
-    lag_col = f"{target_col}_lag1"
-        
-    def get_scaled_row(t: int, current_levels: List[float], current_returns: List[float]) -> np.ndarray:
-        exog_row = full_exog.iloc[t]
-        row_dict = {}
-        for c in feature_cols:
-            if c == lag_col:
-                row_dict[c] = current_levels[t-1]
-            elif "logret_USDIDR_lag" in c: # Handle our new dynamic features
-                # Parse lag number: e.g., "logret_USDIDR_lag1" -> 1
-                try:
-                    lag_num = int(c.split('_')[-1].replace('lag', ''))
-                    row_dict[c] = current_returns[t-lag_num]
-                except:
-                    row_dict[c] = 0.0
-            else:
-                row_dict[c] = exog_row.get(c, 0.0)
-        
-        row_df = pd.DataFrame([row_dict], columns=feature_cols)
-        return scaler_X.transform(row_df.to_numpy())[0]
+    # Build feature matrix for test using ONLY known exog (no recursive target)
+    # Last known USDIDR = last value in train
+    last_known_level = pd.to_numeric(train_df[target_col], errors="coerce").iloc[-1]
+    last_known_return = np.log(last_known_level / pd.to_numeric(train_df[target_col], errors="coerce").iloc[-2])
 
-    # Initialize window with tail of training data
-    train_end_idx = len(train_df) - 1
-    test_start_idx = len(train_df)
+    test_start = len(train_df)
     
-    current_window = []
-    start_window_idx = train_end_idx - lookback + 1
-    
-    for i in range(start_window_idx, train_end_idx + 1):
-        row_scaled = get_scaled_row(i, levels_known, returns_known)
-        current_window.append(row_scaled)
-        
     for i in range(len(test_df)):
-        t = test_start_idx + i
+        t = test_start + i
+        window_start = t - lookback
         
-        input_row_t = get_scaled_row(t, levels_known, returns_known)
-        current_window.append(input_row_t)
-        if len(current_window) > lookback:
-            current_window.pop(0)
-            
-        X_array = np.array(current_window, dtype=np.float32)
-        X_tensor = torch.from_numpy(X_array).unsqueeze(0).to(DEVICE)
+        # Build window dari combined exog — TIDAK pakai predicted USDIDR
+        window = full_exog.iloc[window_start:t].copy()
+        
+        # Inject last KNOWN lag (tidak diupdate tiap step)
+        if f"{target_col}_lag1" in feature_cols:
+            window[f"{target_col}_lag1"] = last_known_level  # anchor ke last real value
+        
+        row_vals = window[feature_cols].fillna(0).values
+        row_scaled = scaler_X.transform(row_vals)
+        
+        X_tensor = torch.tensor(row_scaled, dtype=torch.float32).unsqueeze(0).to(DEVICE)
         
         with torch.no_grad():
-            pred_scaled_delta = model(X_tensor)
-            pred_scaled_delta = pred_scaled_delta.cpu().numpy()[0, 0]
-            
-        pred_raw_delta = scaler_y.inverse_transform([[pred_scaled_delta]])[0, 0]
+            pred_scaled = model(X_tensor).cpu().numpy()[0, 0]
         
-        # Update recursive state
-        level_t = levels_known[t-1] * np.exp(pred_raw_delta)
-        returns_t = np.log(level_t) - np.log(levels_known[t-1])
-        
-        preds.append(level_t)
-        levels_known[t] = level_t
-        returns_known[t] = returns_t
-        
+        pred_level = scaler_y.inverse_transform([[pred_scaled]])[0, 0]
+        preds.append(pred_level)
+
     return np.array(preds, dtype=float)
-
-
 # -----------------------------
 # Main runner
 # -----------------------------
@@ -448,7 +399,8 @@ def run_pipeline(
         exog_df=combined_exog.iloc[: len(train_raw)].reset_index(drop=True),
         target_col=TARGET_COL,
         lookback=LOOKBACK,
-        val_split=0.2
+        val_split=0.2,
+        date_col=train_date_col,
     )
     
     print(f"Data Prepared: Train={len(X_train)}, Val={len(X_val)}, Features={len(feature_cols)}")
@@ -458,9 +410,9 @@ def run_pipeline(
     # -----------------------------
     def objective(trial: optuna.Trial) -> float:
         params = {
-            "hidden_size": trial.suggest_categorical("hidden_size", [256, 512, 1024, 2048, 4096]),
-            "num_layers": trial.suggest_categorical("num_layers", [4, 8, 16, 32]),
-            "dropout": trial.suggest_float("dropout", 0.2, 0.5),
+            "hidden_size": trial.suggest_categorical("hidden_size", [64, 128, 256]),
+            "num_layers": trial.suggest_categorical("num_layers", [1, 2]),
+            "dropout": trial.suggest_float("dropout", 0.3, 0.6),  # lebih agresif,
             "learning_rate": trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True),
             "batch_size": trial.suggest_categorical("batch_size", [32, 64])
         }
@@ -568,6 +520,14 @@ def run_pipeline(
         min_len = min(len(actual), len(test_preds))
         rmse = np.sqrt(mean_squared_error(actual[:min_len], test_preds[:min_len]))
         print(f"True test RMSE: {rmse:.4f}")
+
+        naive_rmse = np.sqrt(mean_squared_error(
+            actual[:min_len][1:], 
+            actual[:min_len][:-1]  # naive = predict yesterday's value
+        ))
+        print(f"Naive baseline RMSE (yesterday = today): {naive_rmse:.4f}")
+        print(f"Your model RMSE: {rmse:.4f}")
+        print(f"Beats naive: {rmse < naive_rmse}")
 
 
 def parse_args() -> argparse.Namespace:
