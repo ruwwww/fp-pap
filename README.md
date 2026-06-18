@@ -76,8 +76,9 @@ This avoids compounding error that plagues level-diff targets in recursive forec
 ```
 eas/
 ├── elasticnet_forecast_template.py   # Single self-contained script
-├── data_train.csv                     # Training data (not tracked)
-├── data_test.csv                      # Test features (not tracked)
+├── data_train.csv                     # Training data
+├── data_train_clean.csv               # Training data cleaned
+├── data_test.csv                      # Test features
 ├── submission.csv                     # Generated submission
 ├── submission_real.csv                # Actual test labels (optional)
 ├── requirements.txt
