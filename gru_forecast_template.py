@@ -350,7 +350,13 @@ def forecast_test_period(model, train_df, test_df, combined_exog,
         # Inject last KNOWN lag (tidak diupdate tiap step)
         if f"{target_col}_lag1" in feature_cols:
             window[f"{target_col}_lag1"] = last_known_level  # anchor ke last real value
-        
+
+        # Zero-fill target-derived cols that cannot be computed in test period
+        # (logret_USDIDR, logret_USDIDR_lag*, etc. — only available during training)
+        for col in feature_cols:
+            if col not in window.columns:
+                window[col] = 0.0
+
         row_vals = window[feature_cols].fillna(0).values
         row_scaled = scaler_X.transform(row_vals)
         
