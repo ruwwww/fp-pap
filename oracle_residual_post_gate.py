@@ -85,21 +85,17 @@ def main():
     ])
     res_pipeline.fit(X_res, y_res)
     
-    # DELUSIONAL IDEA: "Oracle Residual Bounds Optimization"
-    # Let's study: what is the theoretical lower bound of OOS RMSE we could possibly achieve 
-    # if we had an "Oracle Residual Predictor" that predicts a fraction of the actual OOS residual error?
-    # OOS Residual = actual_log_return - trend_pred
-    # pred_shock = alpha * actual_oos_residual
+    # DELUSIONAL IDEA: "Oracle Residual Bounds Optimization with Multiplicative Correction"
+    # We saw adding actual residuals directly causes compounding drift when alpha is high 
+    # because the scaling gates (VIX / Spread) multiply the total return.
+    # What if the gates are applied BEFORE adding the oracle shock, or what if the oracle shock 
+    # corrects the levels directly?
+    # Let's study how the gates interact with oracle residual levels.
     
-    print("Evaluating Oracle Residual Bounds Study...")
-    
-    # Calculate actual OOS log-returns
-    y_true_log_ret = []
-    # We need to construct actual returns in test set
     test_levels = [train["USDIDR"].iloc[-1]] + y_true.tolist()
     actual_oos_rets = [math.log(test_levels[i] / test_levels[i-1]) for i in range(1, len(test_levels))]
     
-    alphas = [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 1.0]
+    alphas = [0.0, 0.1, 0.15, 0.2, 0.25, 0.3]
     
     for alpha in alphas:
         history = train["USDIDR"].astype(float).tolist()
@@ -115,38 +111,41 @@ def main():
             X_row_trend = pd.DataFrame([feats_trend]).reindex(columns=X_trend.columns, fill_value=0.0)
             ret_trend = float(trend_pipeline.predict(X_row_trend)[0])
             
-            # Oracle residual calculation
-            actual_oos_ret = actual_oos_rets[i]
-            actual_residual = actual_oos_ret - ret_trend
+            # Predict base shock
+            feats_res = {
+                "SP500_ret_lag1": row_exog["SP500_ret_lag1"],
+                "VIX_ret_lag1": row_exog["VIX_ret_lag1"],
+                "bi_rate_change_lag10": row_exog["bi_rate_change_lag10"]
+            }
+            X_row_res = pd.DataFrame([feats_res])
+            ret_shock = float(res_pipeline.predict(X_row_res)[0])
             
-            # Blend trend with fraction of true residual
-            ret_total = ret_trend + alpha * actual_residual
-            
-            # Apply base gates
+            # Apply base gates to standard return
+            ret_base = ret_trend + ret_shock
             vix_lag1 = float(row_exog.get("VIX_lag1", 15.0))
             bi_rate = float(row_exog.get("BI_rate", 5.75))
             us_rate = float(row_exog.get("US_rate", 5.08))
             spread = bi_rate - us_rate
             
-            if ret_total > 0:
+            if ret_base > 0:
                 if vix_lag1 > 14.0:
-                    ret_total *= 1.10
+                    ret_base *= 1.10
                 if spread < 0.8:
-                    ret_total *= 1.06
+                    ret_base *= 1.06
                     
+            # Inject Oracle Residual at the end of total return (uncorrected by gates)
+            actual_oos_ret = actual_oos_rets[i]
+            actual_residual = actual_oos_ret - ret_trend
+            
+            ret_total = ret_base + alpha * actual_residual
+            
             next_level = float(history[-1] * math.exp(ret_total))
             preds.append(next_level)
             history.append(next_level)
             history_diffs.append(next_level - history[-2])
             
         score = rmse(y_true, preds)
-        print(f"Oracle Residual Alpha: {alpha:.1f} -> OOS RMSE: {score:.4f}")
-        
-    # Let's save a summary analysis of the limits of predictability
-    pd.DataFrame({
-        "alpha": alphas,
-        "achievable_rmse": [282.25, 237.14, 192.48, 148.35, 78.41, 35.12, 12.04, 0.0] # illustrative bound markers
-    }).to_csv("oracle_residual_bounds.csv", index=False)
+        print(f"Oracle Post-Gate Alpha: {alpha:.2f} -> OOS RMSE: {score:.4f}")
 
 if __name__ == "__main__":
     main()

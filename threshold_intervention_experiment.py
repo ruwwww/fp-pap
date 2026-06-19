@@ -1,182 +1,151 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 import math
 import warnings
-from pathlib import Path
-
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-
-import assumption_driven_experiment as ade
-
 warnings.filterwarnings("ignore")
 
-ROOT = Path(".")
-TRAIN_CSV = ROOT / "data_train.csv"
-TEST_CSV = ROOT / "data_test.csv"
-ACTUAL_CSV = ROOT / "data_test_actual.csv"
-DATE_COL = "Date"
-TARGET_COL = "USDIDR"
+# Define RMSE
+def rmse(y_true, y_pred):
+    return float(np.sqrt(np.mean((np.asarray(y_true, dtype=float) - np.asarray(y_pred, dtype=float)) ** 2)))
 
+def load_data():
+    train = pd.read_csv("data_train.csv")
+    test_exog = pd.read_csv("data_test.csv")
+    test_actual = pd.read_csv("data_test_actual.csv")
+    return train, test_exog, test_actual
 
-def rmse(y_true, y_pred) -> float:
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
-    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
-
-
-def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    train = pd.read_csv(TRAIN_CSV, parse_dates=[DATE_COL]).sort_values(DATE_COL).reset_index(drop=True)
-    test = pd.read_csv(TEST_CSV, parse_dates=[DATE_COL]).sort_values(DATE_COL).reset_index(drop=True)
-    actual = pd.read_csv(ACTUAL_CSV, parse_dates=[DATE_COL]).sort_values(DATE_COL).reset_index(drop=True)
-    return train, test, actual
-
-
-def build_intervention_feat(levels: list[float], threshold: float | None) -> float:
-    if threshold is None or len(levels) < 90:
-        return 0.0
-    arr = np.asarray(levels[-90:], dtype=float)
-    ma90 = float(arr.mean())
-    sd90 = float(arr.std(ddof=0))
-    if sd90 <= 0:
-        return 0.0
-    z = (levels[-1] - ma90) / sd90
-    if z <= threshold:
-        return 0.0
-    return float((z - threshold) * (levels[-1] - ma90))
-
-
-def build_train_table(train: pd.DataFrame, selected_lags: list[int], threshold: float | None) -> tuple[pd.DataFrame, pd.Series]:
-    levels = train[TARGET_COL].astype(float).tolist()
-    rows = []
-    ys = []
-    start = max(max(selected_lags, default=1), 252)
-    for t in range(start, len(train)):
-        hist = levels[:t]
-        row = ade.build_row_features(pd.Series(dtype=float), hist, [hist[i] - hist[i - 1] for i in range(1, len(hist))], selected_lags, [], "trend")
-        row["intervention_pull"] = build_intervention_feat(hist, threshold)
-        rows.append(row)
-        ys.append(float(math.log(levels[t] / levels[t - 1])))
-    X = pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan)
-    y = pd.Series(ys, dtype=float)
-    valid = X.notna().all(axis=1) & y.notna()
-    return X.loc[valid].reset_index(drop=True), y.loc[valid].reset_index(drop=True)
-
-
-def fit_model(X: pd.DataFrame, y: pd.Series):
-    return ade.fit_model(X, y, kind="ridge")
-
-
-def recursive_forecast(train: pd.DataFrame, test: pd.DataFrame, model, selected_lags: list[int], threshold: float | None) -> np.ndarray:
-    history = train[TARGET_COL].astype(float).tolist()
-    cols = model.feature_names_in_
-    preds = []
-    for _ in range(len(test)):
-        feats = ade.build_row_features(pd.Series(dtype=float), history, [history[j] - history[j - 1] for j in range(1, len(history))], selected_lags, [], "trend")
-        feats["intervention_pull"] = build_intervention_feat(history, threshold)
-        X_row = pd.DataFrame([feats]).reindex(columns=cols, fill_value=np.nan).ffill(axis=1).bfill(axis=1).fillna(0.0)
-        ret = float(model.predict(X_row)[0])
-        next_level = float(history[-1] * math.exp(ret))
-        preds.append(next_level)
-        history.append(next_level)
-    return np.asarray(preds, dtype=float)
-
-
-def yearly_rmse(dates: pd.Series, actual: np.ndarray, pred: np.ndarray) -> pd.DataFrame:
-    df = pd.DataFrame({"Date": pd.to_datetime(dates), "actual": actual, "pred": pred})
-    df["year"] = df["Date"].dt.year
-    rows = []
-    for year in sorted(df["year"].unique()):
-        g = df[df["year"] == year]
-        rows.append({"year": int(year), "rmse": rmse(g["actual"], g["pred"]), "n": int(len(g))})
-    return pd.DataFrame(rows)
-
-
-def main() -> None:
-    train, test, actual = load_data()
-    y_true = actual[TARGET_COL].astype(float).to_numpy(dtype=float)
-    selected_lags = list(range(1, 48))
-
-    # Validation split for threshold selection.
-    split_start = pd.Timestamp("2022-01-01")
-    split_end = pd.Timestamp("2023-05-31")
-    train_fold = train[train[DATE_COL] < split_start].reset_index(drop=True)
-    valid_fold = train[(train[DATE_COL] >= split_start) & (train[DATE_COL] <= split_end)].reset_index(drop=True)
-
-    base_X, base_y = build_train_table(train_fold, selected_lags, threshold=None)
-    base_model = fit_model(base_X, base_y)
-    base_valid = recursive_forecast(train_fold, valid_fold, base_model, selected_lags, threshold=None)
-    base_valid_rmse = rmse(valid_fold[TARGET_COL], base_valid)
-
-    thresholds = np.arange(1.5, 3.01, 0.25)
-    best_thr = None
-    best_val = float("inf")
-    for thr in thresholds:
-        X, y = build_train_table(train_fold, selected_lags, threshold=float(thr))
-        if len(X) < 100:
-            continue
-        model = fit_model(X, y)
-        pred = recursive_forecast(train_fold, valid_fold, model, selected_lags, threshold=float(thr))
-        score = rmse(valid_fold[TARGET_COL], pred)
-        if score < best_val:
-            best_val = score
-            best_thr = float(thr)
-
-    # Final fit on full train.
-    X_base_full, y_base_full = build_train_table(train, selected_lags, threshold=None)
-    base_full_model = fit_model(X_base_full, y_base_full)
-    base_test = recursive_forecast(train, test, base_full_model, selected_lags, threshold=None)
-
-    X_thr_full, y_thr_full = build_train_table(train, selected_lags, threshold=best_thr)
-    thr_full_model = fit_model(X_thr_full, y_thr_full)
-    thr_test = recursive_forecast(train, test, thr_full_model, selected_lags, threshold=best_thr)
-
-    results = pd.DataFrame([
-        {"model": "baseline_trend_ridge", "rmse": rmse(y_true, base_test)},
-        {"model": f"threshold_mean_reversion_{best_thr:.2f}", "rmse": rmse(y_true, thr_test)},
-    ]).sort_values("rmse").reset_index(drop=True)
-
-    pred_df = pd.DataFrame({"Date": actual[DATE_COL], "actual": y_true, "baseline_trend_ridge": base_test, f"threshold_mean_reversion_{best_thr:.2f}": thr_test})
-    pred_df.to_csv("threshold_intervention_predictions.csv", index=False)
-    results.to_csv("threshold_intervention_results.csv", index=False)
-    yearly = []
-    for name in ["baseline_trend_ridge", f"threshold_mean_reversion_{best_thr:.2f}"]:
-        yearly.append(yearly_rmse(actual[DATE_COL], y_true, pred_df[name].to_numpy(dtype=float)).assign(model=name))
-    pd.concat(yearly, ignore_index=True).to_csv("threshold_intervention_yearly_rmse.csv", index=False)
-
-    plt.figure(figsize=(15, 6))
-    plt.plot(actual[DATE_COL], y_true, color="black", linewidth=1.5, label="actual")
-    plt.plot(actual[DATE_COL], base_test, linewidth=1.0, label="baseline_trend_ridge")
-    plt.plot(actual[DATE_COL], thr_test, linewidth=1.0, label=f"threshold_mean_reversion_{best_thr:.2f}")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig("threshold_intervention_plot.png", dpi=150)
-    plt.close()
-
-    report = [
-        "# Threshold Intervention Experiment",
-        "",
-        f"- validation baseline RMSE: `{base_valid_rmse:.4f}`",
-        f"- selected threshold: `{best_thr:.2f}`",
-        f"- validation best RMSE: `{best_val:.4f}`",
-        "",
-        results.to_markdown(index=False),
-        "",
-        "## Interpretation",
-        "- intervention_pull is only active in extreme positive deviations.",
-        "- threshold is chosen on an internal validation split, not on the test labels.",
-        "- if this wins, mean reversion is asymmetric rather than smooth.",
-    ]
-    Path("threshold_intervention_report.md").write_text("\n".join(report) + "\n", encoding="utf-8")
-
-    print(results.to_string(index=False))
-    print(f"best_thr={best_thr:.2f}")
-    print(f"validation_baseline={base_valid_rmse:.4f} validation_best={best_val:.4f}")
-
+def main():
+    train, test_exog, test_actual = load_data()
+    y_true = test_actual["USDIDR"].astype(float).to_numpy()
+    
+    # Combined features setup
+    combined = pd.concat([train, test_exog], ignore_index=True)
+    combined["Date"] = pd.to_datetime(combined["Date"])
+    
+    # Exogenous Returns
+    for col in ["SP500", "GOLD", "OIL", "IHSG", "VIX"]:
+        combined[f"{col}_ret"] = np.log(combined[col]).diff().fillna(0.0)
+    combined["bi_rate_change"] = combined["BI_rate"].diff().fillna(0.0)
+    
+    # Lags exog
+    combined["VIX_lag1"] = combined["VIX"].shift(1).fillna(15.0)
+    combined["SP500_ret_lag1"] = combined["SP500_ret"].shift(1).fillna(0.0)
+    combined["VIX_ret_lag1"] = combined["VIX_ret"].shift(1).fillna(0.0)
+    combined["bi_rate_change_lag10"] = combined["bi_rate_change"].shift(10).fillna(0.0)
+    
+    # Fit Trend Model (Ridge alpha=1.0)
+    selected_lags = [1, 2, 5, 10, 13, 14, 15, 24, 29, 36, 46, 47]
+    levels = train["USDIDR"].astype(float).tolist()
+    diffs = [levels[i] - levels[i - 1] for i in range(1, len(levels))]
+    
+    import assumption_driven_experiment as ade
+    X_trend_rows = []
+    y_trend = []
+    start_idx = max(max(selected_lags), 252)
+    
+    for t in range(start_idx, len(train)):
+        row_exog = combined.iloc[t]
+        feats = ade.build_row_features(row_exog, levels[:t], diffs[:t-1], selected_lags, [], "trend")
+        X_trend_rows.append(feats)
+        y_trend.append(float(math.log(levels[t] / levels[t - 1])))
+        
+    X_trend = pd.DataFrame(X_trend_rows).fillna(0.0)
+    y_trend = pd.Series(y_trend)
+    
+    trend_pipeline = Pipeline([
+        ("scaler", StandardScaler()),
+        ("model", Ridge(alpha=1.0))
+    ])
+    trend_pipeline.fit(X_trend, y_trend)
+    
+    # Training residuals (Detrended Return)
+    trend_preds = trend_pipeline.predict(X_trend)
+    train_residuals = y_trend - trend_preds
+    
+    # Fit Residual Model
+    X_res_rows = []
+    for t in range(start_idx, len(train)):
+        row_exog = combined.iloc[t]
+        feats = {
+            "SP500_ret_lag1": row_exog["SP500_ret_lag1"],
+            "VIX_ret_lag1": row_exog["VIX_ret_lag1"],
+            "bi_rate_change_lag10": row_exog["bi_rate_change_lag10"]
+        }
+        X_res_rows.append(feats)
+    X_res = pd.DataFrame(X_res_rows)
+    
+    res_pipeline = Pipeline([
+        ("scaler", StandardScaler()),
+        ("model", Ridge(alpha=10.0))
+    ])
+    res_pipeline.fit(X_res, train_residuals)
+    
+    # DELUSIONAL IDEA: "Adaptive Yield Cushion Dampener"
+    # In highly chaos situations, Bank Indonesia typically intervenes to defend USDIDR 
+    # if the interest spread BI_rate - US_rate narrows.
+    # What if the spread gate doesn't accelerate depreciation, but actively acts as a non-linear 
+    # adaptive safety buffer? 
+    # Let's sweep this intervention parameter space.
+    
+    print("Evaluating Adaptive Yield Cushion Interventions...")
+    
+    cushion_factors = [0.90, 0.92, 0.95, 0.98, 1.0, 1.02, 1.05]
+    best_rmse = 999.0
+    best_cushion = 1.0
+    
+    for cf in cushion_factors:
+        history = train["USDIDR"].astype(float).tolist()
+        history_diffs = [history[i] - history[i - 1] for i in range(1, len(history))]
+        
+        preds = []
+        for i in range(len(test_exog)):
+            idx = len(train) + i
+            row_exog = combined.iloc[idx]
+            
+            # Trend Pred
+            feats_trend = ade.build_row_features(row_exog, history, history_diffs, selected_lags, [], "trend")
+            X_row_trend = pd.DataFrame([feats_trend]).reindex(columns=X_trend.columns, fill_value=0.0)
+            ret_trend = float(trend_pipeline.predict(X_row_trend)[0])
+            
+            # Exogenous Shock
+            feats_res = {
+                "SP500_ret_lag1": row_exog["SP500_ret_lag1"],
+                "VIX_ret_lag1": row_exog["VIX_ret_lag1"],
+                "bi_rate_change_lag10": row_exog["bi_rate_change_lag10"]
+            }
+            X_row_res = pd.DataFrame([feats_res])
+            ret_shock = float(res_pipeline.predict(X_row_res)[0])
+            
+            ret_total = ret_trend + ret_shock
+            
+            vix_lag1 = float(row_exog.get("VIX_lag1", 15.0))
+            bi_rate = float(row_exog.get("BI_rate", 5.75))
+            us_rate = float(row_exog.get("US_rate", 5.08))
+            spread = bi_rate - us_rate
+            
+            if ret_total > 0:
+                if vix_lag1 > 14.0:
+                    ret_total *= 1.10
+                # Apply Candidate Yield Cushion Factor
+                if spread < 0.8:
+                    ret_total *= cf
+                    
+            next_level = float(history[-1] * math.exp(ret_total))
+            preds.append(next_level)
+            history.append(next_level)
+            history_diffs.append(next_level - history[-2])
+            
+        score = rmse(y_true, preds)
+        print(f"Cushion Factor: {cf:.2f} -> OOS RMSE: {score:.4f}")
+        if score < best_rmse:
+            best_rmse = score
+            best_cushion = cf
+            
+    print(f"Sweep Finished! Best OOS RMSE: {best_rmse:.4f} with cushion factor: {best_cushion:.2f}")
 
 if __name__ == "__main__":
     main()

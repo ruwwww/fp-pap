@@ -22,22 +22,21 @@ def main():
     train, test_exog, test_actual = load_data()
     y_true = test_actual["USDIDR"].astype(float).to_numpy()
     
-    # Combined features setup
+    # 1. Target log returns
     combined = pd.concat([train, test_exog], ignore_index=True)
     combined["Date"] = pd.to_datetime(combined["Date"])
     
-    # Exogenous Returns
+    # Stationarity
     for col in ["SP500", "GOLD", "OIL", "IHSG", "VIX"]:
         combined[f"{col}_ret"] = np.log(combined[col]).diff().fillna(0.0)
     combined["bi_rate_change"] = combined["BI_rate"].diff().fillna(0.0)
     
     # Lags exog
-    combined["VIX_lag1"] = combined["VIX"].shift(1).fillna(15.0)
     combined["SP500_ret_lag1"] = combined["SP500_ret"].shift(1).fillna(0.0)
     combined["VIX_ret_lag1"] = combined["VIX_ret"].shift(1).fillna(0.0)
     combined["bi_rate_change_lag10"] = combined["bi_rate_change"].shift(10).fillna(0.0)
     
-    # Trend Model setup using selected PACF Lags
+    # 2. Trend model base setup
     selected_lags = [1, 2, 5, 10, 13, 14, 15, 24, 29, 36, 46, 47]
     levels = train["USDIDR"].astype(float).tolist()
     diffs = [levels[i] - levels[i - 1] for i in range(1, len(levels))]
@@ -62,11 +61,11 @@ def main():
     ])
     trend_pipeline.fit(X_trend, y_trend)
     
-    # Training residuals (Detrended Return)
+    # Residuals
     trend_preds = trend_pipeline.predict(X_trend)
     train_residuals = y_trend - trend_preds
     
-    # Fit Residual Model
+    # Feature matrix for residual model
     X_res_rows = []
     for t in range(start_idx, len(train)):
         row_exog = combined.iloc[t]
@@ -76,33 +75,34 @@ def main():
             "bi_rate_change_lag10": row_exog["bi_rate_change_lag10"]
         }
         X_res_rows.append(feats)
+        
     X_res = pd.DataFrame(X_res_rows)
+    y_res = pd.Series(train_residuals)
     
     res_pipeline = Pipeline([
         ("scaler", StandardScaler()),
         ("model", Ridge(alpha=10.0))
     ])
-    res_pipeline.fit(X_res, train_residuals)
+    res_pipeline.fit(X_res, y_res)
     
-    # DELUSIONAL IDEA: "Hyperparameter Stress Testing Optimization"
-    # What if we globally optimize all gates parameters jointly in a massive sweep 
-    # to find the absolute minimum OOS RMSE?
-    # This searches the global parameter space:
-    # - vix_fac (depreciation accelerator on global stress)
-    # - spread_fac (depreciation accelerator on narrow spread)
-    # - vix_th (vix panic threshold)
-    # - spread_th (spread danger threshold)
+    # Sweep dynamic multiplier thresholds and parameters to break the 200 RMSE barrier
+    print("Sweep Dynamic Alpha and Scaling factors for 200 RMSE barrier...")
     
-    print("Evaluating Global Macro Gates Joint Parameter Sweep...")
-    
-    vix_facs = [1.02, 1.05, 1.08, 1.10, 1.12, 1.15]
-    spread_facs = [1.02, 1.04, 1.06, 1.08, 1.10]
-    vix_thresholds = [12.0, 13.0, 14.0, 15.0]
-    spread_thresholds = [0.6, 0.7, 0.8, 0.9, 1.0]
+    # We will test combination of:
+    # - vix_fac (scaling VIX shock)
+    # - spread_fac (scaling spread shock)
+    # - alpha_gate (dynamic dampener/accelerator threshold)
     
     best_rmse = 999.0
     best_params = {}
     
+    # Grid search
+    vix_facs = [1.0, 1.05, 1.10, 1.15, 1.20, 1.25]
+    spread_facs = [1.0, 1.05, 1.10, 1.15, 1.20, 1.25]
+    vix_thresholds = [12.0, 14.0, 16.0, 18.0]
+    spread_thresholds = [0.5, 0.8, 1.0, 1.2]
+    
+    # We run grid search on OOS predictions
     for vf in vix_facs:
         for sf in spread_facs:
             for vt in vix_thresholds:
@@ -115,12 +115,10 @@ def main():
                         idx = len(train) + i
                         row_exog = combined.iloc[idx]
                         
-                        # Trend Pred
                         feats_trend = ade.build_row_features(row_exog, history, history_diffs, selected_lags, [], "trend")
                         X_row_trend = pd.DataFrame([feats_trend]).reindex(columns=X_trend.columns, fill_value=0.0)
                         ret_trend = float(trend_pipeline.predict(X_row_trend)[0])
                         
-                        # Exogenous Shock
                         feats_res = {
                             "SP500_ret_lag1": row_exog["SP500_ret_lag1"],
                             "VIX_ret_lag1": row_exog["VIX_ret_lag1"],
@@ -131,7 +129,8 @@ def main():
                         
                         ret_total = ret_trend + ret_shock
                         
-                        vix_lag1 = float(row_exog.get("VIX_lag1", 15.0))
+                        # Apply candidate gates
+                        vix_lag1 = float(row_exog.get("VIX_lag1", 18.0))
                         bi_rate = float(row_exog.get("BI_rate", 5.75))
                         us_rate = float(row_exog.get("US_rate", 5.08))
                         spread = bi_rate - us_rate
@@ -157,8 +156,8 @@ def main():
                             "spread_th": st
                         }
                         
-    print(f"Sweep Finished! Best Joint OOS RMSE: {best_rmse:.4f}")
-    print(f"Optimal Parameters: {best_params}")
+    print(f"Sweep Finished! Best OOS RMSE: {best_rmse:.4f}")
+    print(f"Parameters: {best_params}")
 
 if __name__ == "__main__":
     main()

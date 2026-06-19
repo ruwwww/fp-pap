@@ -1,5 +1,9 @@
-setup,rmse,bounds
-Baseline (Zero Shocks),288.48010259741227,Null
-Lower Bound Oracle (Negative Shocks),6833.663575359005,Lower Bound Limit
-Upper Bound Oracle (Positive Shocks),27762.594163373997,Upper Bound Limit
-Perfect Residual Oracle (All Shocks),1626.3061318735324,Theoretical Limit
+alpha,achievable_rmse
+0.0,282.25
+0.1,237.14
+0.2,192.48
+0.3,148.35
+0.5,78.41
+0.7,35.12
+0.9,12.04
+1.0,0.0

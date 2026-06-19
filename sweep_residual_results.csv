@@ -1,0 +1,4 @@
+model,rmse
+Ridge Residual,280.50161177223555
+LightGBM Residual,269.35291689049575
+LSTM Residual,11644.651499377882

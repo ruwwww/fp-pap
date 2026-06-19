@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import HuberRegressor, Ridge
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
+import lightgbm as lgb
 import math
 import warnings
 warnings.filterwarnings("ignore")
@@ -18,30 +19,36 @@ def load_data():
     test_actual = pd.read_csv("data_test_actual.csv")
     return train, test_exog, test_actual
 
-def main():
-    train, test_exog, test_actual = load_data()
-    y_true = test_actual["USDIDR"].astype(float).to_numpy()
-    
-    # Combined features setup
+def prepare_features(train, test_exog):
     combined = pd.concat([train, test_exog], ignore_index=True)
     combined["Date"] = pd.to_datetime(combined["Date"])
     
-    # Exogenous Returns
+    # Exogenous log-returns
     for col in ["SP500", "GOLD", "OIL", "IHSG", "VIX"]:
         combined[f"{col}_ret"] = np.log(combined[col]).diff().fillna(0.0)
     combined["bi_rate_change"] = combined["BI_rate"].diff().fillna(0.0)
     
-    # Lags exog
-    combined["VIX_lag1"] = combined["VIX"].shift(1).fillna(15.0)
+    # Lag Exogenous
     combined["SP500_ret_lag1"] = combined["SP500_ret"].shift(1).fillna(0.0)
     combined["VIX_ret_lag1"] = combined["VIX_ret"].shift(1).fillna(0.0)
     combined["bi_rate_change_lag10"] = combined["bi_rate_change"].shift(10).fillna(0.0)
     
-    # Trend Model setup using selected PACF Lags
+    return combined
+
+def main():
+    train, test_exog, test_actual = load_data()
+    y_true = test_actual["USDIDR"].astype(float).to_numpy()
+    
+    combined = prepare_features(train, test_exog)
+    
+    # Trend Model setup
     selected_lags = [1, 2, 5, 10, 13, 14, 15, 24, 29, 36, 46, 47]
+    
+    # Prepare training tables
     levels = train["USDIDR"].astype(float).tolist()
     diffs = [levels[i] - levels[i - 1] for i in range(1, len(levels))]
     
+    # Build Trend Model (Ridge alpha=1.0)
     import assumption_driven_experiment as ade
     X_trend_rows = []
     y_trend = []
@@ -62,11 +69,11 @@ def main():
     ])
     trend_pipeline.fit(X_trend, y_trend)
     
-    # Training residuals (Detrended Return)
+    # Generate Training Residuals
     trend_preds = trend_pipeline.predict(X_trend)
     train_residuals = y_trend - trend_preds
     
-    # Fit Residual Model
+    # Detrended Return Prediction feature matrix
     X_res_rows = []
     for t in range(start_idx, len(train)):
         row_exog = combined.iloc[t]
@@ -76,54 +83,47 @@ def main():
             "bi_rate_change_lag10": row_exog["bi_rate_change_lag10"]
         }
         X_res_rows.append(feats)
+        
     X_res = pd.DataFrame(X_res_rows)
     y_res = pd.Series(train_residuals)
     
-    res_pipeline = Pipeline([
+    # Fit Huber Regressor on residuals
+    huber_pipeline = Pipeline([
         ("scaler", StandardScaler()),
-        ("model", Ridge(alpha=10.0))
+        ("model", HuberRegressor(epsilon=1.35))
     ])
-    res_pipeline.fit(X_res, y_res)
+    huber_pipeline.fit(X_res, y_res)
     
-    # DELUSIONAL IDEA: "Oracle Residual Bounds Optimization"
-    # Let's study: what is the theoretical lower bound of OOS RMSE we could possibly achieve 
-    # if we had an "Oracle Residual Predictor" that predicts a fraction of the actual OOS residual error?
-    # OOS Residual = actual_log_return - trend_pred
-    # pred_shock = alpha * actual_oos_residual
-    
-    print("Evaluating Oracle Residual Bounds Study...")
-    
-    # Calculate actual OOS log-returns
-    y_true_log_ret = []
-    # We need to construct actual returns in test set
-    test_levels = [train["USDIDR"].iloc[-1]] + y_true.tolist()
-    actual_oos_rets = [math.log(test_levels[i] / test_levels[i-1]) for i in range(1, len(test_levels))]
-    
-    alphas = [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 1.0]
-    
-    for alpha in alphas:
+    # Forecast OOS
+    def run_forecast(use_huber=True):
         history = train["USDIDR"].astype(float).tolist()
-        history_diffs = [history[i] - history[i - 1] for i in range(1, len(history))]
+        diffs = [history[i] - history[i - 1] for i in range(1, len(history))]
         
         preds = []
         for i in range(len(test_exog)):
             idx = len(train) + i
             row_exog = combined.iloc[idx]
             
-            # Trend Pred
-            feats_trend = ade.build_row_features(row_exog, history, history_diffs, selected_lags, [], "trend")
+            # Trend prediction
+            feats_trend = ade.build_row_features(row_exog, history, diffs, selected_lags, [], "trend")
             X_row_trend = pd.DataFrame([feats_trend]).reindex(columns=X_trend.columns, fill_value=0.0)
             ret_trend = float(trend_pipeline.predict(X_row_trend)[0])
             
-            # Oracle residual calculation
-            actual_oos_ret = actual_oos_rets[i]
-            actual_residual = actual_oos_ret - ret_trend
+            # Residual prediction
+            ret_shock = 0.0
+            if use_huber:
+                feats_res = {
+                    "SP500_ret_lag1": row_exog["SP500_ret_lag1"],
+                    "VIX_ret_lag1": row_exog["VIX_ret_lag1"],
+                    "bi_rate_change_lag10": row_exog["bi_rate_change_lag10"]
+                }
+                X_row_res = pd.DataFrame([feats_res])
+                ret_shock = float(huber_pipeline.predict(X_row_res)[0])
+                
+            ret_total = ret_trend + ret_shock
             
-            # Blend trend with fraction of true residual
-            ret_total = ret_trend + alpha * actual_residual
-            
-            # Apply base gates
-            vix_lag1 = float(row_exog.get("VIX_lag1", 15.0))
+            # Apply gates
+            vix_lag1 = float(row_exog.get("VIX_lag1", 18.0))
             bi_rate = float(row_exog.get("BI_rate", 5.75))
             us_rate = float(row_exog.get("US_rate", 5.08))
             spread = bi_rate - us_rate
@@ -137,16 +137,12 @@ def main():
             next_level = float(history[-1] * math.exp(ret_total))
             preds.append(next_level)
             history.append(next_level)
-            history_diffs.append(next_level - history[-2])
+            diffs.append(next_level - history[-2])
             
-        score = rmse(y_true, preds)
-        print(f"Oracle Residual Alpha: {alpha:.1f} -> OOS RMSE: {score:.4f}")
-        
-    # Let's save a summary analysis of the limits of predictability
-    pd.DataFrame({
-        "alpha": alphas,
-        "achievable_rmse": [282.25, 237.14, 192.48, 148.35, 78.41, 35.12, 12.04, 0.0] # illustrative bound markers
-    }).to_csv("oracle_residual_bounds.csv", index=False)
+        return preds
+
+    huber_preds = run_forecast(use_huber=True)
+    print(f"Huber Regressor on Residuals OOS RMSE: {rmse(y_true, huber_preds):.4f}")
 
 if __name__ == "__main__":
     main()
