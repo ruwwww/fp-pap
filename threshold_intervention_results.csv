@@ -1,0 +1,3 @@
+model,rmse
+threshold_mean_reversion_1.50,314.86120066769917
+baseline_trend_ridge,327.2881567963608

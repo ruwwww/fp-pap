@@ -1,0 +1,19 @@
+{
+  "target": "diff",
+  "feature_set": "basic",
+  "params": {
+    "n_estimators": 2000,
+    "learning_rate": 0.006,
+    "num_leaves": 15,
+    "min_child_samples": 10,
+    "subsample": 0.85,
+    "colsample_bytree": 0.85,
+    "reg_alpha": 0.0,
+    "reg_lambda": 0.0
+  },
+  "metrics": {
+    "rmse": 775.2778543187961,
+    "mae": 605.7548699607178,
+    "mape": 3.6588455515135654
+  }
+}

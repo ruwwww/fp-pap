@@ -1,0 +1,9 @@
+year,rmse,n,model
+2023,261.2677799537995,152,baseline_trend_ridge
+2024,383.5007461086466,262,baseline_trend_ridge
+2025,261.8676254702333,258,baseline_trend_ridge
+2026,397.355107417609,106,baseline_trend_ridge
+2023,210.5503446120022,152,threshold_mean_reversion_1.50
+2024,389.3759159089774,262,threshold_mean_reversion_1.50
+2025,301.4327182370531,258,threshold_mean_reversion_1.50
+2026,261.08581781258215,106,threshold_mean_reversion_1.50

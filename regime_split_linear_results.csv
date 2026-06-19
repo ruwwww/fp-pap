@@ -1,0 +1,3 @@
+model,rmse
+single_trend_ridge,327.2881567963608
+regime_split_ridge,1435.8923569474077

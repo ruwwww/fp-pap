@@ -1,0 +1,5 @@
+model,rmse
+ensemble_final,292.8119550700079
+ar_plus_trend,292.8119550700079
+elasticnet_full,443.01227375023217
+elasticnet_residual_safe,1771.2273707096444
