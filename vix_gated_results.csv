@@ -1,0 +1,4 @@
+model,rmse
+Pure Trend Model,327.2881567963608
+Pure Threshold Model (thr=1.5),314.86120066769917
+VIX Gated Model (gate=19.5),332.654308807237

@@ -1,0 +1,4 @@
+feature_set,rmse
+Base (Exogenous returns),288.4801025974146
+Combinatorial Set Only,337.15482792202266
+Combined (Base + Combinatorial),337.1548279220205

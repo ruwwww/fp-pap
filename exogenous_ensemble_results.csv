@@ -1,0 +1,4 @@
+model,rmse
+Pure Single Lag Transformer (Seed 5),882.0324929063073
+Pure Multi-Seed Ensemble,481.9769980350756
+Exogenous Gated + Exog Features Ensemble,572.6763426521691

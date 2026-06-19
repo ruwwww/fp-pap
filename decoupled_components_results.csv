@@ -1,0 +1,7 @@
+component_setup,rmse,description
+1. Pure Trend Model,292.8119550700079,Baseline autoregressive trend only
+2. Trend + Residual Shocks,367.9328479359006,Adding high-frequency stationary macro differences to residuals
+3. Trend + VIX Gate Only,289.33806485589963,Applying 10% acceleration when VIX > 14.0
+4. Trend + Spread Gate Only,288.18740625892593,Applying 6% acceleration when BI-US interest spread < 0.8%
+5. Trend + Both Gates (No Shocks),288.48010259741227,Combining VIX and Spread Gates without modeling exogenous residuals
+6. Full Gated Fluctuating Macro Model,269.37587949190515,Complete setup: Trend + Shocks + Both Gates

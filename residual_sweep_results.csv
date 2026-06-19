@@ -1,0 +1,6 @@
+model,rmse
+Lasso (L1 Regularization),271.3305013388946
+Random Forest (Robust Ensemble),273.99892005198524
+ElasticNet (L1 + L2),291.01259667618797
+Extra Trees (Highly Randomized),301.7870688749163
+Huber Regressor (Robust),390.21061851760106
