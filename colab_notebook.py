@@ -170,15 +170,14 @@ def prepare_features(train, test_exog):
     
     return combined
 
-def build_row_features(exog_row, level_hist, diff_hist, selected_lags, selected_exog, feature_mode):
-    """Assembles all target and exogenous features for a single day prediction step."""
-    # Custom helper imports from main project files if exists, else build row-wise
+def make_target_history_features(level_hist, diff_hist, feature_mode):
+    """Generates features from target USDIDR level and diff history strictly from the past."""
     level = np.asarray(level_hist, dtype=float)
     diff = np.asarray(diff_hist, dtype=float)
     feats = {}
     
-    # Target lags
-    for lag in selected_lags:
+    # Basic lags
+    for lag in [1, 2, 3, 5, 10, 20, 60]:
         feats[f"diff_lag{lag}"] = float(diff[-lag]) if len(diff) >= lag else 0.0
         
     if feature_mode in {"trend", "full"}:
@@ -212,9 +211,15 @@ def build_row_features(exog_row, level_hist, diff_hist, selected_lags, selected_
             feats["extreme_high"] = 0.0
             feats["extreme_low"] = 0.0
             
+    return feats
+
+def build_row_features(exog_row, level_hist, diff_hist, selected_lags, selected_exog, feature_mode):
+    """Assembles all target and exogenous features for a single day prediction step."""
+    feats = make_target_history_features(level_hist, diff_hist, feature_mode)
+    for lag in selected_lags:
+        feats[f"diff_lag{lag}"] = float(diff_hist[-lag]) if len(diff_hist) >= lag else 0.0
     for name in selected_exog:
         feats[name] = float(exog_row.get(name, 0.0))
-        
     return feats
 
 # Tabular Data Preparation for Models
@@ -407,13 +412,16 @@ def fit_models(train_df, combined):
     X_gru, y_gru = build_gru_dataset(X_res_scaled_df, y_res, time_steps=time_steps)
     
     # Train robust GRU model with regularization to prevent overfitting/instability
+    # Train highly regularized GRU model to keep outputs stable and close to zero
     gru_model = Sequential([
-        GRU(16, input_shape=(time_steps, X_gru.shape[2]), return_sequences=False),
-        Dropout(0.2),
-        Dense(1)
+        GRU(8, input_shape=(time_steps, X_gru.shape[2]), return_sequences=False,
+            kernel_regularizer=tf.keras.regularizers.l2(0.1),
+            recurrent_regularizer=tf.keras.regularizers.l2(0.1)),
+        Dropout(0.3),
+        Dense(1, kernel_regularizer=tf.keras.regularizers.l2(0.1))
     ])
-    gru_model.compile(optimizer=Adam(learning_rate=0.002), loss="mse")
-    gru_model.fit(X_gru, y_gru, epochs=15, batch_size=32, verbose=0)
+    gru_model.compile(optimizer=Adam(learning_rate=0.001), loss="mse")
+    gru_model.fit(X_gru, y_gru, epochs=10, batch_size=64, verbose=0)
     
     return trend_pipeline, res_ridge_pipeline, bias_models, bias_features, gru_model, scaler, X_trend.columns
 
@@ -461,6 +469,8 @@ def recursive_forecast(train_df, test_df, combined, trend_model, res_model, bias
             window_exog = exog_arr[idx - time_steps:idx]
             window_exog_3d = np.expand_dims(window_exog, axis=0)
             ret_shock = float(res_model.predict(window_exog_3d, verbose=0)[0, 0])
+            # Scale down and clip GRU prediction to prevent recursive exponential divergence
+            ret_shock = np.clip(ret_shock * 0.1, -0.005, 0.005)
             
         ret_total = ret_trend + ret_shock
         
