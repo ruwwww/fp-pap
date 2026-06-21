@@ -148,12 +148,12 @@ def main():
     score = rmse(y_true, preds)
     print(f"Two-Stage Decoupled Model OOS RMSE: {score:.4f}")
     
-    # Save best predicted
+    # Save predicted to final_oos_258_predictions.csv instead of submission.csv
     pd.DataFrame({
         "Date": test_actual["Date"],
         "USDIDR": preds
-    }).to_csv("submission.csv", index=False)
-    print("Predictions written to 'submission.csv'!")
+    }).to_csv("final_oos_258_predictions.csv", index=False)
+    print("Predictions written to 'final_oos_258_predictions.csv'!")
     
     # Plotting
     import matplotlib
@@ -162,11 +162,11 @@ def main():
     plt.figure(figsize=(15, 6))
     plt.plot(test_actual["Date"], y_true, color="black", label="Actual")
     plt.plot(test_actual["Date"], preds, color="red", label=f"Two-Stage Model (RMSE={score:.2f})")
-    plt.title("USDIDR Out-Of-Sample Forecasting: Two-Stage Shock Model")
+    plt.title("USDIDR Out-Of-Sample Forecasting: Two-Stage Shock Model (258 RMSE)")
     plt.legend()
-    plt.savefig("final_fluctuating_macro_plot.png", dpi=150)
+    plt.savefig("final_oos_258_plot.png", dpi=150)
     plt.close()
-    print("Updated 'final_fluctuating_macro_plot.png' successfully!")
+    print("Updated 'final_oos_258_plot.png' successfully!")
 
 if __name__ == "__main__":
     main()
