@@ -5,10 +5,11 @@ USD/IDR Forecasting & Model Reconstruction Notebook for Google Colab
 This file is designed to be self-contained and run on Google Colab.
 It includes:
 1. Reconstruction of the best model (Two-Stage Decoupled Ridge Model with CV Gating and Bias Correction).
-2. Skenario Dataset splits (80-20, 70-30, 60-40) evaluated on 3 models:
+2. Skenario Dataset splits (80-20, 70-30, 60-40) evaluated on 4 models:
    - Model A: Machine Learning (Two-Stage Decoupled Ridge with 3-Layer Bias Correction)
    - Model B: Deep Learning (Ridge Trend + GRU Residual with Bias Correction)
-   - Ensemble: Hybrid (Average of Model A and Model B)
+   - Model C: ML-ML Ensemble (Hybrid of Model A and Static Trend Model)
+   - Model D: ML-DL Ensemble (Hybrid of Model A and Model B)
 3. Comprehensive evaluation using RMSE, MAE, MAPE, and R-squared.
 4. Trajectory plotting showing actual training values transitioning into test predictions.
 """
@@ -230,8 +231,6 @@ def build_trend_dataset(train_df, combined, selected_lags):
     y_vals = []
     start_idx = max(max(selected_lags), 252)
     
-    # Fit row-wise features
-    import assumption_driven_experiment as ade
     for t in range(start_idx, len(train_df)):
         row_exog = combined.iloc[t]
         feats = build_row_features(row_exog, levels[:t], diffs[:t-1], selected_lags, [], "trend")
@@ -258,15 +257,6 @@ def build_residual_dataset(train_df, combined, start_idx, trend_preds, y_trend):
     X = pd.DataFrame(X_rows)
     y = pd.Series(residuals)
     return X, y
-
-def build_gru_dataset(X_res, y_res, time_steps=5):
-    vals = X_res.values
-    ys = y_res.values
-    X_3d, y_out = [], []
-    for i in range(time_steps, len(vals)):
-        X_3d.append(vals[i - time_steps:i])
-        y_out.append(ys[i])
-    return np.array(X_3d), np.array(y_out)
 
 def fit_bias_models(train_df, combined, trend_model, res_model, vix_fac, spread_fac, selected_lags, trend_cols, res_cols):
     """Trains 3-layer bias models on rolling training simulation errors."""
@@ -355,7 +345,6 @@ def fit_bias_models(train_df, combined, trend_model, res_model, vix_fac, spread_
     stable_features = ["forecast_age", "trend_slope", "trend_curvature", "VIX", "recent_forecast_direction", "GOLD_ret", "SP500_ret"]
     bias_models = {}
     
-    # Handle potentially small bias dataset in small splits
     regime_conditions = {
         "VIX_Low": df_bias["VIX"] < 14.0,
         "VIX_Med": (df_bias["VIX"] >= 14.0) & (df_bias["VIX"] <= 20.0),
@@ -365,7 +354,6 @@ def fit_bias_models(train_df, combined, trend_model, res_model, vix_fac, spread_
     for rname, condition in regime_conditions.items():
         sub = df_bias[condition]
         if len(sub) < 5:
-            # Fallback to entire dataset if partition is empty to prevent crashes
             sub = df_bias
         model_b = Pipeline([
             ("scaler", StandardScaler()),
@@ -375,7 +363,7 @@ def fit_bias_models(train_df, combined, trend_model, res_model, vix_fac, spread_
         
     return bias_models, stable_features
 
-# Main Pipeline Fitting Function
+# Fit Deep Learning and Ridge Models
 def fit_models(train_df, combined):
     """Fits shared Trend Model, Model A (Ridge Residual + Bias), and Model B (GRU Residual)."""
     # 1. Fit Ridge Trend Model
@@ -411,7 +399,6 @@ def fit_models(train_df, combined):
     time_steps = 5
     X_gru, y_gru = build_gru_dataset(X_res_scaled_df, y_res, time_steps=time_steps)
     
-    # Train robust GRU model with regularization to prevent overfitting/instability
     # Train highly regularized GRU model to keep outputs stable and close to zero
     gru_model = Sequential([
         GRU(8, input_shape=(time_steps, X_gru.shape[2]), return_sequences=False,
@@ -444,12 +431,14 @@ def recursive_forecast(train_df, test_df, combined, trend_model, res_model, bias
     trend_cols = list(trend_cols)
     res_cols = ["SP500_ret_lag1", "VIX_ret_lag1", "bi_rate_change_lag10", "IHSG_ret_lag1", "OIL_ret_lag1"]
     
-    scaler_bias_low = bias_models["VIX_Low"].named_steps["scaler"]
-    ridge_bias_low = bias_models["VIX_Low"].named_steps["model"]
-    scaler_bias_med = bias_models["VIX_Med"].named_steps["scaler"]
-    ridge_bias_med = bias_models["VIX_Med"].named_steps["model"]
-    scaler_bias_high = bias_models["VIX_High"].named_steps["scaler"]
-    ridge_bias_high = bias_models["VIX_High"].named_steps["model"]
+    # Load bias models
+    if bias_models is not None:
+        scaler_bias_low = bias_models["VIX_Low"].named_steps["scaler"]
+        ridge_bias_low = bias_models["VIX_Low"].named_steps["model"]
+        scaler_bias_med = bias_models["VIX_Med"].named_steps["scaler"]
+        ridge_bias_med = bias_models["VIX_Med"].named_steps["model"]
+        scaler_bias_high = bias_models["VIX_High"].named_steps["scaler"]
+        ridge_bias_high = bias_models["VIX_High"].named_steps["model"]
     
     for i in range(len(test_df)):
         idx = len(train_df) + i
@@ -461,7 +450,9 @@ def recursive_forecast(train_df, test_df, combined, trend_model, res_model, bias
         ret_trend = float(trend_model.predict(X_row_trend)[0])
         
         # 2. Predict Residual Component
-        if model_type == "Ridge":
+        if model_type == "Static":
+            ret_shock = 0.0
+        elif model_type == "Ridge":
             feats_res = {col: float(row_exog.get(col, 0.0)) for col in EXOG_COLS}
             X_row_res = pd.DataFrame([feats_res]).reindex(columns=res_cols, fill_value=0.0)
             ret_shock = float(res_model.predict(X_row_res)[0])
@@ -469,16 +460,16 @@ def recursive_forecast(train_df, test_df, combined, trend_model, res_model, bias
             window_exog = exog_arr[idx - time_steps:idx]
             window_exog_3d = np.expand_dims(window_exog, axis=0)
             ret_shock = float(res_model.predict(window_exog_3d, verbose=0)[0, 0])
-            # Scale down and clip GRU prediction to prevent recursive exponential divergence
             ret_shock = np.clip(ret_shock * 0.1, -0.005, 0.005)
             
         ret_total = ret_trend + ret_shock
         
-        # 3. Dynamic Asymmetrical Risk Gates
+        # Define gating variables unconditionally to avoid UnboundLocalError
         vix_lag1 = float(row_exog.get("VIX_lag1", 15.0))
         spread = float(row_exog.get("BI_rate", 5.75)) - float(row_exog.get("US_rate", 5.08))
         
-        if ret_total > 0:
+        # 3. Dynamic Gating (only applied if not static baseline)
+        if model_type != "Static" and ret_total > 0:
             if vix_lag1 > 14.0: ret_total *= BEST_VIX
             if spread < 0.8: ret_total *= BEST_SPREAD
                 
@@ -491,38 +482,50 @@ def recursive_forecast(train_df, test_df, combined, trend_model, res_model, bias
         history.append(pred_base)
         history_diffs.append(pred_base - history[-2])
         
-        # 4. Predict and Apply Bias Correction (applied to both to keep them optimized)
-        hist_window = preds_base_list[max(0, i - 10) : i + 1]
-        x_arr = np.arange(len(hist_window))
-        slope = np.polyfit(x_arr, hist_window, 1)[0] / pred_base if len(hist_window) >= 3 else 0.0
-        curvature = np.polyfit(x_arr, hist_window, 2)[0] / pred_base if len(hist_window) >= 3 else 0.0
-        recent_direction = (preds_base_list[i] - preds_base_list[max(0, i-5)]) / preds_base_list[max(0, i-5)] if len(preds_base_list) >= 6 else 0.0
-        
-        bias_feats = {
-            "forecast_age": float(i),
-            "trend_slope": slope,
-            "trend_curvature": curvature,
-            "VIX": float(row_exog.get("VIX", 18.0)),
-            "recent_forecast_direction": recent_direction,
-            "GOLD_ret": float(row_exog.get("GOLD_ret", 0.0)),
-            "SP500_ret": float(row_exog.get("SP500_ret", 0.0))
-        }
-        bias_vec = np.array([[bias_feats.get(col, 0.0) for col in bias_features]])
-        
-        if vix_lag1 < 14.0:
-            bias_correction = float(ridge_bias_low.predict(scaler_bias_low.transform(bias_vec))[0])
-        elif 14.0 <= vix_lag1 <= 20.0:
-            bias_correction = float(ridge_bias_med.predict(scaler_bias_med.transform(bias_vec))[0])
-        else:
-            bias_correction = float(ridge_bias_high.predict(scaler_bias_high.transform(bias_vec))[0])
+        # 4. Predict and Apply Bias Correction (if active)
+        if bias_models is not None and model_type != "Static":
+            hist_window = preds_base_list[max(0, i - 10) : i + 1]
+            x_arr = np.arange(len(hist_window))
+            slope = np.polyfit(x_arr, hist_window, 1)[0] / pred_base if len(hist_window) >= 3 else 0.0
+            curvature = np.polyfit(x_arr, hist_window, 2)[0] / pred_base if len(hist_window) >= 3 else 0.0
+            recent_direction = (preds_base_list[i] - preds_base_list[max(0, i-5)]) / preds_base_list[max(0, i-5)] if len(preds_base_list) >= 6 else 0.0
             
-        preds_final.append(pred_base + BEST_BETA * bias_correction)
+            bias_feats = {
+                "forecast_age": float(i),
+                "trend_slope": slope,
+                "trend_curvature": curvature,
+                "VIX": float(row_exog.get("VIX", 18.0)),
+                "recent_forecast_direction": recent_direction,
+                "GOLD_ret": float(row_exog.get("GOLD_ret", 0.0)),
+                "SP500_ret": float(row_exog.get("SP500_ret", 0.0))
+            }
+            bias_vec = np.array([[bias_feats.get(col, 0.0) for col in bias_features]])
+            
+            if vix_lag1 < 14.0:
+                bias_correction = float(ridge_bias_low.predict(scaler_bias_low.transform(bias_vec))[0])
+            elif 14.0 <= vix_lag1 <= 20.0:
+                bias_correction = float(ridge_bias_med.predict(scaler_bias_med.transform(bias_vec))[0])
+            else:
+                bias_correction = float(ridge_bias_high.predict(scaler_bias_high.transform(bias_vec))[0])
+                
+            preds_final.append(pred_base + BEST_BETA * bias_correction)
+        else:
+            preds_final.append(pred_base)
         
     return np.array(preds_final)
 
+def build_gru_dataset(X_res, y_res, time_steps=5):
+    vals = X_res.values
+    ys = y_res.values
+    X_3d, y_out = [], []
+    for i in range(time_steps, len(vals)):
+        X_3d.append(vals[i - time_steps:i])
+        y_out.append(ys[i])
+    return np.array(X_3d), np.array(y_out)
+
 # Evaluation Routine for the Splits
 def run_split_scenarios(train_full, combined):
-    """Executes Model A, Model B, and Ensemble over 80/20, 70/30, and 60/40 splits of the train set."""
+    """Executes evaluation of Models A, B, C, and D over 80/20, 70/30, and 60/40 splits of train set."""
     split_scenarios = [
         ("Skenario 1 (80% Train - 20% Test)", 0.8),
         ("Skenario 2 (70% Train - 30% Test)", 0.7),
@@ -530,7 +533,7 @@ def run_split_scenarios(train_full, combined):
     ]
     
     results = []
-    fig, axes = plt.subplots(3, 1, figsize=(15, 18))
+    fig, axes = plt.subplots(3, 1, figsize=(15, 20))
     
     for i, (name, train_ratio) in enumerate(split_scenarios):
         print(f"\nRunning {name}...")
@@ -539,30 +542,41 @@ def run_split_scenarios(train_full, combined):
         train_part = train_full.iloc[:split_idx].reset_index(drop=True)
         test_part = train_full.iloc[split_idx:].reset_index(drop=True)
         
-        # Prepare subset data
         combined_subset = prepare_features(train_part, test_part.drop(columns=[TARGET_COL]))
         
-        # Train Models
+        # Fit models
         trend_model, res_ridge, bias_models, bias_features, res_gru, scaler, trend_cols = fit_models(train_part, combined_subset)
         
         # Forecast Model A: Ridge
         preds_a = recursive_forecast(train_part, test_part, combined_subset, trend_model, res_ridge, bias_models, bias_features, "Ridge", trend_cols)
         
-        # Forecast Model B: GRU
+        # Forecast Model B: Deep GRU
         preds_b = recursive_forecast(train_part, test_part, combined_subset, trend_model, res_gru, bias_models, bias_features, "GRU", trend_cols, scaler)
         
-        # Ensemble: Hybrid (Average of Model A and Model B)
-        preds_ensemble = 0.5 * preds_a + 0.5 * preds_b
+        # Forecast Static Baseline (used for Model C)
+        preds_static = recursive_forecast(train_part, test_part, combined_subset, trend_model, None, None, None, "Static", trend_cols)
+        
+        # Ensemble C: ML-ML (Decoupled Ridge + Static Trend)
+        preds_c = 0.5 * preds_a + 0.5 * preds_static
+        
+        # Ensemble D: ML-DL (Decoupled Ridge + Deep GRU)
+        preds_d = 0.5 * preds_a + 0.5 * preds_b
         
         y_true = test_part[TARGET_COL].astype(float).values
         
         # Calculate Metrics
         m_a = calculate_metrics(y_true, preds_a)
         m_b = calculate_metrics(y_true, preds_b)
-        m_ens = calculate_metrics(y_true, preds_ensemble)
+        m_c = calculate_metrics(y_true, preds_c)
+        m_d = calculate_metrics(y_true, preds_d)
         
-        # Store for rekapitulasi
-        for model_name, metrics in [("Model A (Decoupled Ridge)", m_a), ("Model B (Deep GRU)", m_b), ("Ensemble (Hybrid)", m_ens)]:
+        # Store metrics
+        for model_name, metrics in [
+            ("Model A (Decoupled Ridge)", m_a),
+            ("Model B (Deep GRU)", m_b),
+            ("Model C (ML-ML Ensemble)", m_c),
+            ("Model D (ML-DL Ensemble)", m_d)
+        ]:
             results.append({
                 "Skenario": name,
                 "Model": model_name,
@@ -572,7 +586,7 @@ def run_split_scenarios(train_full, combined):
                 "R2": metrics["R2"]
             })
             
-        # Plot predictions for this scenario showing history to prediction path
+        # Plot predictions for this scenario
         hist_plot_len = min(150, len(train_part))
         hist_dates = train_part[DATE_COL].iloc[-hist_plot_len:]
         hist_vals = train_part[TARGET_COL].iloc[-hist_plot_len:]
@@ -580,11 +594,12 @@ def run_split_scenarios(train_full, combined):
         dates_test = test_part[DATE_COL]
         
         ax = axes[i]
-        ax.plot(hist_dates, hist_vals, color="gray", label="Historical Train Data", alpha=0.7)
+        ax.plot(hist_dates, hist_vals, color="gray", label="Historical Train Data", alpha=0.5)
         ax.plot(dates_test, y_true, color="black", label="Actual Test Data", linewidth=2)
         ax.plot(dates_test, preds_a, color="blue", label=f"Model A (Ridge) [RMSE={m_a['RMSE']:.1f}]", linestyle="--")
         ax.plot(dates_test, preds_b, color="orange", label=f"Model B (GRU) [RMSE={m_b['RMSE']:.1f}]", linestyle=":")
-        ax.plot(dates_test, preds_ensemble, color="red", label=f"Ensemble (Hybrid) [RMSE={m_ens['RMSE']:.1f}]", linewidth=2)
+        ax.plot(dates_test, preds_c, color="green", label=f"Model C (ML-ML) [RMSE={m_c['RMSE']:.1f}]", linestyle="-.")
+        ax.plot(dates_test, preds_d, color="red", label=f"Model D (ML-DL) [RMSE={m_d['RMSE']:.1f}]", linewidth=2)
         
         ax.axvline(x=train_part[DATE_COL].iloc[-1], color="purple", linestyle="-.", label="Train-Test Split Line")
         ax.set_title(f"USDIDR Forecast Comparison: {name}")
@@ -595,7 +610,7 @@ def run_split_scenarios(train_full, combined):
         
     plt.tight_layout()
     plt.savefig("scenarios_comparison_plot.png", dpi=150)
-    plt.show() # colab friendly display
+    plt.show() # Display inline in colab
     plt.close()
     
     # Save validation table summary
@@ -625,49 +640,74 @@ def main():
     combined_full = prepare_features(train_full, test_exog)
     run_split_scenarios(train_full, combined_full)
     
-    # 2. RUN RECONSTRUCTION OF BEST MODEL ON FULL TEST SET FOR SUBMISSION
-    print("\n--- STEP 2: Reconstructing Best Model (Two-Stage Decoupled Ridge with Gating & Bias Correction) ---")
+    # 2. RUN RECONSTRUCTION OF ALL MODELS ON FULL TEST SET
+    print("\n--- STEP 2: Reconstructing All Models on Full Test Set ---")
     # Fit models on the complete training set
-    trend_model, res_ridge, bias_models, bias_features, _, _, trend_cols = fit_models(train_full, combined_full)
+    trend_model, res_ridge, bias_models, bias_features, res_gru, scaler, trend_cols = fit_models(train_full, combined_full)
     
-    # Forecast recursively into the Kaggle OOS period (Model A - Best Decoupled Ridge)
-    test_preds = recursive_forecast(train_full, test_exog, combined_full, trend_model, res_ridge, bias_models, bias_features, "Ridge", trend_cols)
+    # Forecast recursively for all models
+    test_preds_a = recursive_forecast(train_full, test_exog, combined_full, trend_model, res_ridge, bias_models, bias_features, "Ridge", trend_cols)
+    test_preds_b = recursive_forecast(train_full, test_exog, combined_full, trend_model, res_gru, bias_models, bias_features, "GRU", trend_cols, scaler)
+    test_preds_static = recursive_forecast(train_full, test_exog, combined_full, trend_model, None, None, None, "Static", trend_cols)
     
-    # Save the submission csv file for Kaggle
+    test_preds_c = 0.5 * test_preds_a + 0.5 * test_preds_static
+    test_preds_d = 0.5 * test_preds_a + 0.5 * test_preds_b
+    
+    # Save the submission csv file for Kaggle (using the best model: Model A)
     sub_df = pd.DataFrame({
         "Date": test_exog[DATE_COL].dt.strftime("%Y-%m-%d"),
-        "USDIDR": test_preds
+        "USDIDR": test_preds_a
     })
     sub_df.to_csv("submission.csv", index=False)
-    print("Kaggle Submission saved successfully to 'submission.csv'!")
+    print("Kaggle Submission saved successfully to 'submission.csv' (from best Model A)!")
     
-    # Plot final predicted path alongside history
-    plt.figure(figsize=(15, 6))
+    # Plot final predicted paths alongside history
+    plt.figure(figsize=(15, 7))
     hist_len = min(300, len(train_full))
-    plt.plot(train_full[DATE_COL].iloc[-hist_len:], train_full[TARGET_COL].iloc[-hist_len:], color="gray", label="Historical USDIDR", alpha=0.7)
+    plt.plot(train_full[DATE_COL].iloc[-hist_len:], train_full[TARGET_COL].iloc[-hist_len:], color="gray", label="Historical USDIDR", alpha=0.5)
     
     if test_actual is not None:
         y_true_final = test_actual[TARGET_COL].astype(float).values
-        final_metrics = calculate_metrics(y_true_final, test_preds)
+        
+        # Calculate metrics for all models
+        final_m_a = calculate_metrics(y_true_final, test_preds_a)
+        final_m_b = calculate_metrics(y_true_final, test_preds_b)
+        final_m_c = calculate_metrics(y_true_final, test_preds_c)
+        final_m_d = calculate_metrics(y_true_final, test_preds_d)
+        
         plt.plot(test_actual[DATE_COL], y_true_final, color="black", label="Actual Test USDIDR", linewidth=2)
-        plt.plot(test_exog[DATE_COL], test_preds, color="red", label=f"Predicted USDIDR (RMSE={final_metrics['RMSE']:.2f})", linewidth=2.5)
+        plt.plot(test_exog[DATE_COL], test_preds_a, color="blue", label=f"Model A (Ridge) [RMSE={final_m_a['RMSE']:.2f}]", linestyle="--")
+        plt.plot(test_exog[DATE_COL], test_preds_b, color="orange", label=f"Model B (GRU) [RMSE={final_m_b['RMSE']:.2f}]", linestyle=":")
+        plt.plot(test_exog[DATE_COL], test_preds_c, color="green", label=f"Model C (ML-ML) [RMSE={final_m_c['RMSE']:.2f}]", linestyle="-.")
+        plt.plot(test_exog[DATE_COL], test_preds_d, color="red", label=f"Model D (ML-DL) [RMSE={final_m_d['RMSE']:.2f}]", linewidth=2)
+        
+        # Print summary table
+        final_summary = pd.DataFrame([
+            {"Model": "Model A (Decoupled Ridge)", **final_m_a},
+            {"Model": "Model B (Deep GRU)", **final_m_b},
+            {"Model": "Model C (ML-ML Ensemble)", **final_m_c},
+            {"Model": "Model D (ML-DL Ensemble)", **final_m_d}
+        ])
         print("\n=======================================================")
-        print("FINAL OUT-OF-SAMPLE TEST SET EVALUATION (MODEL A):")
+        print("FINAL OUT-OF-SAMPLE TEST SET EVALUATION (ALL MODELS):")
         print("=======================================================")
-        for k, v in final_metrics.items():
-            print(f"  Final {k}: {v:.4f}")
+        print(final_summary.to_string(index=False))
+        print("=======================================================")
     else:
-        plt.plot(test_exog[DATE_COL], test_preds, color="red", label="Predicted USDIDR", linewidth=2.5)
+        plt.plot(test_exog[DATE_COL], test_preds_a, color="blue", label="Model A (Ridge)", linestyle="--")
+        plt.plot(test_exog[DATE_COL], test_preds_b, color="orange", label="Model B (GRU)", linestyle=":")
+        plt.plot(test_exog[DATE_COL], test_preds_c, color="green", label="Model C (ML-ML)", linestyle="-.")
+        plt.plot(test_exog[DATE_COL], test_preds_d, color="red", label="Model D (ML-DL)", linewidth=2)
         
     plt.axvline(x=train_full[DATE_COL].iloc[-1], color="purple", linestyle="-.", label="Forecast Origin Boundary")
-    plt.title("USDIDR Out-Of-Sample Forecast: Reconstructed Best Model A (No Leakage)")
+    plt.title("USDIDR Out-Of-Sample Forecast: Reconstructed Models Comparison (No Leakage)")
     plt.xlabel("Date")
     plt.ylabel("USDIDR Exchange Rate")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig("submission_predictions_plot.png", dpi=150)
-    plt.show() # colab friendly display
+    plt.show() # Display inline in colab
     plt.close()
     print("Out-of-sample prediction path plot saved and displayed as 'submission_predictions_plot.png'.")
 
